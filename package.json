@@ -1,0 +1,30 @@
+{
+  "name": "aetio-backend",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:integration": "node scripts/integration-test.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.637.0",
+    "@aws-sdk/client-dynamodb": "^3.637.0",
+    "@aws-sdk/credential-providers": "^3.637.0",
+    "@aws-sdk/lib-dynamodb": "^3.637.0",
+    "@elastic/elasticsearch": "^8.15.0",
+    "@langchain/langgraph": "^0.2.0",
+    "express": "^4.19.2",
+    "openai": "^4.58.2",
+    "unstructured-client": "^0.16.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.6.3",
+    "vitest": "^1.6.0"
+  }
+}
