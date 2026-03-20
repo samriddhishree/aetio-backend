@@ -7,7 +7,7 @@ import type {
   ImageBlock,
   ImageChunk,
   PipelineError,
-} from "./types";
+} from "../types";
 import { assertConfig } from "./services/config";
 import { documentLoaderNode } from "./agents/documentLoader";
 import { chunkingNode } from "./agents/chunkingNode";
@@ -176,12 +176,13 @@ export async function summarizeProject(
   await persistInsights([
     {
       insight_id: insightId,
+      parent_insight_id: undefined,
       text: summary,
       s3_node: `summary:${documentId}`,
       document_id: documentId,
       additional_refs: { contextUrls },
       user_id: options?.userId,
-      status: options?.status ?? "In Progress",
+      status: options?.status ?? "Pending",
     },
   ]);
 

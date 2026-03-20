@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { GraphState } from "../types";
+import type { GraphState } from "../../types";
 import { hierarchyBuilderAgent } from "../agents/hierarchyBuilderAgent";
 import * as openaiModule from "../services/openai";
 

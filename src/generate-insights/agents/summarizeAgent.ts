@@ -1,4 +1,4 @@
-import type { GraphState, PipelineError } from "../types";
+import type { GraphState, PipelineError } from "../../types";
 import { config } from "../services/config";
 import { openai, OPENAI_MODEL } from "../services/openai";
 import { loadDocumentText } from "../services/document-loader";

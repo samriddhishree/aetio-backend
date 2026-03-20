@@ -1,4 +1,4 @@
-import type { GraphState, Insight, PipelineError } from "../types";
+import type { GraphState, Insight, PipelineError } from "../../types";
 import { config } from "../services/config";
 import { openai, OPENAI_MODEL } from "../services/openai";
 import { mapWithConcurrency } from "../services/utils";

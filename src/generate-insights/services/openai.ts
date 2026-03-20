@@ -6,3 +6,4 @@ export const openai = new OpenAI({
 });
 
 export const OPENAI_MODEL = config.openaiModel;
+export const OPENAI_HELPER_MODEL = config.openaiHelperModel;

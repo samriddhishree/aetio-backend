@@ -37,7 +37,40 @@ assert.ok("errors" in data, "Expected errors field");
 console.log(response);
 //assert.ok (response?.insights > 0, "Expected non-zero insights");
 
+const insightsEndpoint = new URL(
+  `/insights?user_id=${encodeURIComponent(payload.userId)}&parent_insight_id=null`,
+  baseUrl,
+).toString();
+
+const insightsResponse = await fetch(insightsEndpoint, { method: "GET" });
+const insightsText = await insightsResponse.text();
+let insightsData;
+try {
+  insightsData = JSON.parse(insightsText);
+} catch {
+  insightsData = null;
+}
+
+assert.ok(
+  insightsResponse.ok,
+  `Expected 2xx response for GET /insights, got ${insightsResponse.status}: ${insightsText}`,
+);
+assert.ok(insightsData && typeof insightsData === "object", "Expected JSON response body from /insights");
+assert.ok(typeof insightsData.count === "number", "Expected count field from /insights");
+assert.ok(Array.isArray(insightsData.items), "Expected items array from /insights");
+
+if (insightsData.items.length > 0) {
+  for (const item of insightsData.items) {
+    assert.equal(item.user_id, payload.userId, "Expected user_id filter to match");
+    assert.ok(
+      !("parent_insight_id" in item) || item.parent_insight_id == null,
+      "Expected parent_insight_id to be null or missing",
+    );
+  }
+}
+
 console.log("Integration test passed", {
   status: data.status,
-  requestId: data.requestId
+  requestId: data.requestId,
+  insightCount: insightsData?.count,
 });

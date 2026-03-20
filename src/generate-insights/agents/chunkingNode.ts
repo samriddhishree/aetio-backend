@@ -4,7 +4,7 @@ import type {
   ImageContentBlock,
   PipelineError,
   TextBlock,
-} from "../types";
+} from "../../types";
 import { chunkDocument } from "../services/chunking";
 import { hashId } from "../services/utils";
 

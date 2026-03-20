@@ -1,4 +1,4 @@
-import type { Chunk, Document } from "../types";
+import type { Chunk, Document } from "../../types";
 import { hashId } from "./utils";
 
 function estimateTokens(text: string): number {

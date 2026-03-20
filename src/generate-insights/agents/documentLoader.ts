@@ -1,4 +1,4 @@
-import type { Document, GraphState, PipelineError } from "../types";
+import type { Document, GraphState, PipelineError } from "../../types";
 import { config } from "../services/config";
 import { loadDocumentText } from "../services/document-loader";
 import { hashId, mapWithConcurrency } from "../services/utils";

@@ -1,4 +1,6 @@
 import { runIngestionPipeline, summarizeProject } from "./graph";
+import { listInsights, persistInsights } from "./services/dynamo";
+import type { Insight } from "../types";
 
 export type GenerateInsightsArguments = {
   outputUrls?: string[];
@@ -56,6 +58,8 @@ export const handler = async (event: GenerateInsightsEvent) => {
     userId,
     projectId,
   );
+  const pendingInsightsNum = result.insights.length;
+  // TODO persist summary.additional_refs.pendingInsightsNum = pendingInsightsNum
 
   return JSON.stringify({
     ok: result.errors.length === 0,

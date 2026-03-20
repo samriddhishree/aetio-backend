@@ -1,6 +1,7 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { UnstructuredClient } from "unstructured-client";
 import { Strategy } from "unstructured-client/sdk/models/shared";
+import { setMaxListeners } from "node:events";
 import { getAwsAssumeRoleProvider } from "./aws";
 import { config } from "./config";
 import { compactWhitespace } from "./utils";
@@ -127,6 +128,9 @@ async function bodyToBuffer(body: unknown): Promise<Buffer> {
 export async function loadDocumentText(url: string): Promise<LoadedDocument> {
   console.debug("document-loader:load:start", { url });
   const controller = new AbortController();
+  // Some downstream HTTP clients attach multiple abort listeners per request.
+  // Raise the limit on this per-request signal to avoid false-positive warnings.
+  setMaxListeners(25, controller.signal);
   const timeout = setTimeout(
     () => controller.abort(),
     config.requestTimeoutMs,

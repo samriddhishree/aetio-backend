@@ -1,8 +1,99 @@
-import type { GraphState, Insight, PipelineError } from "../types";
+import type { GraphState, Insight, PipelineError } from "../../types";
 import { config } from "../services/config";
-import { openai, OPENAI_MODEL } from "../services/openai";
+import { openai, OPENAI_HELPER_MODEL } from "../services/openai";
 import { hashId } from "../services/utils";
+/*
+const HIERARCHY_PROMPT = `
+You are a hierarchy builder agent.
 
+Your task is to organize insights into parent-child relationships WITHOUT introducing abstraction or generic themes.
+
+Core rules:
+
+1. Do NOT create high-level or generic summaries.
+   - Avoid vague themes like "Market Trends", "Economic Factors", etc.
+
+2. Parent insights must remain concrete and close to the original insight text.
+   - A parent insight should be a slightly more general version of its children, but still specific.
+
+3. Sub-insights should:
+   - Be closely derived from an existing insight
+   - Modify or refine the original insight using metadata (e.g., region, segment, product)
+   - Not introduce new information
+
+4. Preserve specificity:
+   - Every insight must remain grounded in the original evidence
+   - Do NOT generalize beyond what is supported
+
+5. Use metadata to shape hierarchy:
+   - Group insights when they differ primarily by metadata (e.g., same concept across regions or segments)
+   - Parent insight = shared concept
+   - Child insights = metadata-specific variants
+
+6. Do NOT rewrite insights into summaries.
+   - Prefer minimal edits (e.g., slight generalization or removing qualifiers)
+
+7. Use ONLY the provided insight_ids.
+   - Do not create new insights.
+
+8. If no clear hierarchy exists, keep insights as flat (no parent-child) relationships.
+
+Output format:
+- Return a hierarchy using parent_insight_id relationships
+- Each insight must have:
+  - insight_id
+  - parent_insight_id (or null if root)
+
+Goal:
+Create a structure where:
+- Parents represent shared concepts
+- Children represent metadata-specific refinements of that concept
+
+Return ONLY valid JSON matching the schema.
+`;
+*/
+const HIERARCHY_PROMPT = `
+You are a hierarchy builder agent.
+
+Your task is to group existing insights into parent-child relationships using ONLY the provided insight IDs.
+
+Rules:
+
+1. Do NOT create new insights.
+2. Do NOT rewrite, summarize, or generalize insight text.
+3. Do NOT invent high-level themes.
+4. A parent must always be an existing insight.
+5. group_id must be an existing insight_id, and represents the parent insight for that group.
+6. Children must also be existing insight_ids.
+7. Only group insights when one existing insight is a clear parent concept of other existing insights.
+8. If no clear parent-child relationship exists, leave the insight ungrouped.
+9. Use metadata only to determine grouping relationships, not to generate new text.
+
+Return JSON in this format:
+
+{
+  "groups": [
+    {
+      "group_id": "existing_parent_insight_id",
+      "insight_ids": [
+        "child_insight_id_1",
+        "child_insight_id_2"
+      ]
+    }
+  ],
+  "ungrouped_insight_ids": [
+    "insight_id_3"
+  ]
+}
+
+Additional constraints:
+- group_id must not appear inside its own insight_ids array.
+- Every insight_id in the output must come from the provided input.
+- Do not assign an insight to more than one group.
+- Prefer no grouping over weak or generic grouping.
+
+Return ONLY valid JSON matching the schema.
+`;
 const HIERARCHY_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -13,24 +104,29 @@ const HIERARCHY_SCHEMA = {
         type: "object",
         additionalProperties: false,
         properties: {
-          group_text: { type: "string" },
-          member_ids: {
+          group_id: { type: "string" },
+          insight_ids: {
             type: "array",
             items: { type: "string" },
           },
         },
-        required: ["group_text", "member_ids"],
+        required: ["group_id", "insight_ids"],
       },
     },
+    ungrouped_insight_ids: {
+      type: "array",
+      items: { type: "string" },
+    },
   },
-  required: ["groups"],
+  required: ["groups", "ungrouped_insight_ids"],
 } as const;
 
 type HierarchyResponse = {
   groups: Array<{
-    group_text: string;
-    member_ids: string[];
+    group_id: string;
+    insight_ids: string[];
   }>;
+  ungrouped_insight_ids: string[];
 };
 
 export async function hierarchyBuilderAgent(
@@ -44,6 +140,7 @@ export async function hierarchyBuilderAgent(
     ...insight,
     user_id: userId ?? insight.user_id,
     status: "Pending",
+    project_id: projectId
   }));
   const insightById = new Map(
     updatedInsights.map((insight) => [insight.insight_id, insight]),
@@ -62,13 +159,12 @@ export async function hierarchyBuilderAgent(
 
     try {
       const response = await openai.chat.completions.create({
-        model: OPENAI_MODEL,
+        model: OPENAI_HELPER_MODEL,
         temperature: 0.2,
         messages: [
           {
             role: "system",
-            content:
-              "You are a hierarchy builder agent. Group related insights into high-level themes. Use only the provided insight IDs for membership. Return JSON that matches the schema.",
+            content: HIERARCHY_PROMPT,
           },
           {
             role: "user",
@@ -91,21 +187,12 @@ export async function hierarchyBuilderAgent(
       if (!content) throw new Error("Empty OpenAI response.");
 
       const parsed = JSON.parse(content) as HierarchyResponse;
-
+      console.debug("HierarchyBuilderAgent:parsed-response", JSON.stringify(parsed));
       for (const group of parsed.groups ?? []) {
-        if (group.member_ids.length === 0) continue;
-        const groupId = hashId(`${documentId}:${group.group_text}`);
-        const groupInsight: Insight = {
-          insight_id: groupId,
-          text: group.group_text,
-          s3_node: `doc:${documentId}`,
-          document_id: documentId,
-          user_id: userId,
-          status: "Pending",
-        };
-        updatedInsights.push(groupInsight);
-
-        for (const memberId of group.member_ids) {
+        const groupInsight = insightById.has(group.group_id)
+        if (group.insight_ids.length === 0 || groupInsight) continue;
+        
+        for (const memberId of group.insight_ids) {
           const member = insightById.get(memberId);
           if (!member) {
             errors.push({
@@ -116,7 +203,7 @@ export async function hierarchyBuilderAgent(
             continue;
           }
           if (member.parent_insight_id) continue;
-          member.parent_insight_id = groupId;
+          member.parent_insight_id = groupInsight.insight_id;
         }
       }
     } catch (error) {

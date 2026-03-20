@@ -1,5 +1,5 @@
 import { Client } from "@elastic/elasticsearch";
-import type { Insight } from "../types";
+import type { Insight } from "../../types";
 import { config } from "./config";
 
 const client = new Client({ node: config.elasticNode });

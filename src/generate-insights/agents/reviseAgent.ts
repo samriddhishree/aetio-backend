@@ -1,4 +1,4 @@
-import type { Insight, InsightMetadataEntry } from "../types";
+import type { Insight, InsightMetadataEntry } from "../../types";
 import {
   ALLOWED_METADATA_TAGS,
   MIN_METADATA_CONFIDENCE,

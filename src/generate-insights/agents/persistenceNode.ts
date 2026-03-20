@@ -1,4 +1,4 @@
-import type { GraphState, PipelineError } from "../types";
+import type { GraphState, PipelineError } from "../../types";
 import { persistInsights } from "../services/dynamo";
 
 export async function persistenceNode(

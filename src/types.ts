@@ -1,3 +1,10 @@
+type Status = {
+  ACCEPTED: string;
+  DECLINED: string;
+  COMPLETED: string;
+  PENDING: string;
+}
+
 export type InsightMetadataEntry = {
   tag: string;
   value: string;
@@ -7,6 +14,7 @@ export type InsightMetadataEntry = {
 export type Insight = {
   insight_id: string;
   parent_insight_id?: string;
+  project_id?: string;
   text: string;
   supporting_chunks?: Array<{
     chunk_id: string;

@@ -1,4 +1,4 @@
-import type { GraphState, Insight, InsightMetadataEntry } from "../types";
+import type { GraphState, Insight, InsightMetadataEntry } from "../../types";
 
 export type CritiqueMap = Record<string, string[]>;
 
