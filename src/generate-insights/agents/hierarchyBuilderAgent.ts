@@ -1,7 +1,7 @@
 import type { GraphState, Insight, PipelineError } from "../../types";
-import { config } from "../services/config";
-import { openai, OPENAI_HELPER_MODEL } from "../services/openai";
-import { hashId } from "../services/utils";
+import { config } from "../../common/services/config";
+import { openai, OPENAI_HELPER_MODEL } from "../../common/services/openai";
+import { hashId } from "../../common/services/utils";
 /*
 const HIERARCHY_PROMPT = `
 You are a hierarchy builder agent.
@@ -135,10 +135,12 @@ export async function hierarchyBuilderAgent(
   console.debug("HierarchyBuilderAgent:start", { insights: state.insights.length });
   const errors: PipelineError[] = [];
   const userId = state.userId;
+  const userInfo = state.userInfo;
   const projectId = state.projectId;
   const updatedInsights: Insight[] = state.insights.map((insight) => ({
     ...insight,
     user_id: userId ?? insight.user_id,
+    user_info: userInfo ?? insight.user_info,
     status: "Pending",
     project_id: projectId
   }));

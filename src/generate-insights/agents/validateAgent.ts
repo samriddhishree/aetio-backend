@@ -8,7 +8,7 @@ import {
   normalizeTag,
   normalizeValue,
   type GraphStateCRV,
-} from "../services/insightMetadata";
+} from "../../common/services/insightMetadata";
 
 export class ValidateAgent {
   // Input: revised insights[]

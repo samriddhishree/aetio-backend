@@ -11,6 +11,8 @@ type Config = {
   documentsBucket: string;
   unstructuredApiKey: string;
   unstructuredApiUrl: string;
+  awsRegion: string;
+  cognitoUserPoolId?: string;
 };
 
 export const config: Config = {
@@ -22,10 +24,12 @@ export const config: Config = {
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS ?? "30000"),
   ddbTableName: process.env.DDB_TABLE_NAME ?? "insights",
   elasticNode: process.env.ELASTIC_NODE ?? "",
-  elasticIndex: process.env.ELASTIC_INDEX ?? "insights",
+  elasticIndex: process.env.ELASTIC_INDEX ?? "user_id",
   documentsBucket: process.env.DOCUMENTS_BUCKET ?? "documents",
   unstructuredApiKey: process.env.UNSTRUCTURED_API_KEY ?? "7NswlME2XLHasX9Qiebp4ETR4keNqO",
   unstructuredApiUrl: process.env.UNSTRUCTURED_API_URL ?? "",
+  awsRegion: process.env.AWS_REGION ?? "us-east-1",
+  cognitoUserPoolId: process.env.COGNITO_USER_POOL_ID?.trim(),
 };
 
 export function assertConfig() {

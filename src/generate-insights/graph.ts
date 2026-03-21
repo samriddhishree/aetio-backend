@@ -7,8 +7,9 @@ import type {
   ImageBlock,
   ImageChunk,
   PipelineError,
+  UserInfo,
 } from "../types";
-import { assertConfig } from "./services/config";
+import { assertConfig } from "../common/services/config";
 import { documentLoaderNode } from "./agents/documentLoader";
 import { chunkingNode } from "./agents/chunkingNode";
 //import { imageExtractionAgent } from "./agents/imageExtractionAgent";
@@ -22,8 +23,8 @@ import { metadataConsolidationAgent } from "./agents/metadataConsolidationAgent"
 import { persistenceNode } from "./agents/persistenceNode";
 import { indexingNode } from "./agents/indexingNode";
 import { summarizeAgent } from "./agents/summarizeAgent";
-import { persistInsights } from "./services/dynamo";
-import { hashId } from "./services/utils";
+import { persistInsights } from "../common/services/dynamo";
+import { hashId } from "../common/services/utils";
 
 const START = "__start__";
 const END = "__end__";
@@ -81,6 +82,7 @@ const GraphStateAnnotation = Annotation.Root({
   contextUrls: Annotation<string[] | undefined>({ value: overwrite, default: () => undefined }),
   researchContext: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
   userId: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  userInfo: Annotation<UserInfo | undefined>({ value: overwrite, default: () => undefined }),
   projectId: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
   summary: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
   imageDocumentId: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
@@ -130,9 +132,9 @@ export function buildIngestionGraph() {
     .addEdge("ValidateAgent", "MetadataConsolidationAgent")
     .addEdge("MetadataConsolidationAgent", "HierarchyBuilderAgent")
     //.addEdge("HierarchyBuilderAgent", "MetadataAgent")
-   .addEdge("HierarchyBuilderAgent", "PersistenceNode")
-    // .addEdge("PersistenceNode", "IndexingNode")
-    // .addEdge("IndexingNode", END)
+    .addEdge("HierarchyBuilderAgent", "PersistenceNode")
+    //.addEdge("PersistenceNode", "IndexingNode")
+    //.addEdge("IndexingNode", END)
     .addEdge("PersistenceNode", END)
     .compile();
 }
@@ -142,6 +144,7 @@ export async function summarizeProject(
   researchContext: string,
   options?: {
     userId?: string;
+    userInfo?: UserInfo;
     status?: string;
     documentId?: string;
   },
@@ -182,6 +185,7 @@ export async function summarizeProject(
       document_id: documentId,
       additional_refs: { contextUrls },
       user_id: options?.userId,
+      user_info: options?.userInfo,
       status: options?.status ?? "Pending",
     },
   ]);
@@ -194,6 +198,7 @@ export async function runIngestionPipeline(
   imageBlocks: ImageBlock[] = [],
   imageDocumentId?: string,
   userId?: string,
+  userInfo?: UserInfo,
   projectId?: string,
 ): Promise<GraphState> {
   assertConfig();
@@ -203,6 +208,7 @@ export async function runIngestionPipeline(
     imageBlocks,
     imageDocumentId: imageDocumentId ?? undefined,
     userId: userId ?? undefined,
+    userInfo: userInfo ?? undefined,
     projectId: projectId ?? undefined,
   });
 }

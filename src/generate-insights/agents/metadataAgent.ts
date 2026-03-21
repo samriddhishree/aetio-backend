@@ -1,7 +1,7 @@
 import type { GraphState, Insight, PipelineError } from "../../types";
-import { config } from "../services/config";
-import { openai, OPENAI_MODEL } from "../services/openai";
-import { mapWithConcurrency } from "../services/utils";
+import { config } from "../../common/services/config";
+import { openai, OPENAI_MODEL } from "../../common/services/openai";
+import { mapWithConcurrency } from "../../common/services/utils";
 
 const METADATA_SCHEMA = {
   type: "object",

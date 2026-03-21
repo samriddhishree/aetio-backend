@@ -1,12 +1,14 @@
 import { runIngestionPipeline, summarizeProject } from "./graph";
-import { listInsights, persistInsights } from "./services/dynamo";
-import type { Insight } from "../types";
+import { listInsights, persistInsights } from "../common/services/dynamo";
+import type { Insight, UserInfo } from "../types";
 
 export type GenerateInsightsArguments = {
   outputUrls?: string[];
   contextUrls?: string[];
   researchContext?: string;
   userId?: string;
+  userInfo?: UserInfo;
+  user_info?: UserInfo;
   image_blocks?: Array<{ block_id: string; image_s3: string; page: number }>;
   document_id?: string;
 };
@@ -17,6 +19,7 @@ export type GenerateInsightsEvent = {
 
 export const handler = async (event: GenerateInsightsEvent) => {
   const { outputUrls, contextUrls, researchContext, userId } = event.arguments;
+  const userInfo = event.arguments.userInfo ?? event.arguments.user_info;
   if (!userId) {
     throw new Error("userId is required");
   }
@@ -46,7 +49,7 @@ export const handler = async (event: GenerateInsightsEvent) => {
   const summaryResult = await summarizeProject(
     safeContextUrls,
     researchContext ?? "",
-    { userId },
+    { userId, userInfo },
   );
   const { summary, insight_id: projectId} = summaryResult;
   console.log("summaryResult", summaryResult);
@@ -56,6 +59,7 @@ export const handler = async (event: GenerateInsightsEvent) => {
     imageBlocks,
     imageDocumentId,
     userId,
+    userInfo,
     projectId,
   );
   const pendingInsightsNum = result.insights.length;

@@ -8,7 +8,12 @@ import {
   persistInsights,
   type InsightFilters,
   type InsightFilterKey,
-} from "./generate-insights/services/dynamo";
+} from "./common/services/dynamo";
+import {
+  InsightSearchRepository,
+  InsightSearchService,
+  type SearchQuery,
+} from "./search";
 
 import type { Insight } from "./types";
 
@@ -23,6 +28,7 @@ type FormattedInsight = Insight & {
 
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
+const insightSearchService = new InsightSearchService(new InsightSearchRepository());
 const allowedOrigins = ['http://localhost:5001']; // Replace with your frontend origins
 // CORS middleware
 app.use(cors({
@@ -179,6 +185,29 @@ app.get("/formatted-insights", async (req: Request, res: Response) => {
     const items = await listInsights(parsedFilters);
     const formattedItems = formatInsights(items);
     return res.json({ count: formattedItems.length, items: formattedItems });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post("/insights/search", async (req: Request, res: Response) => {
+  const body = req.body as Partial<SearchQuery> | undefined;
+  if (!body || typeof body.query !== "string") {
+    return res.status(400).json({ error: "Body must include { query: string }" });
+  }
+
+  try {
+    const result = await insightSearchService.searchInsights({
+      query: body.query,
+      filters: body.filters,
+      pagination: body.pagination,
+      include_ancestors: body.include_ancestors,
+      include_descendants: body.include_descendants,
+      ancestor_depth: body.ancestor_depth,
+      descendant_depth: body.descendant_depth,
+    });
+    return res.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });

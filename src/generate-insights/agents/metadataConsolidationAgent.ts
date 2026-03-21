@@ -1,7 +1,7 @@
 import {
   consolidateMetadata,
   type GraphStateCRV,
-} from "../services/insightMetadata";
+} from "../../common/services/insightMetadata";
 
 export class MetadataConsolidationAgent {
   // Input: insights[]

@@ -8,7 +8,12 @@ type Status = {
 export type InsightMetadataEntry = {
   tag: string;
   value: string;
-  confidence: number;
+  confidence?: number;
+};
+
+export type UserInfo = {
+  full_name?: string;
+  email_address?: string;
 };
 
 export type Insight = {
@@ -24,6 +29,7 @@ export type Insight = {
   metadata?: InsightMetadataEntry[];
   additional_refs?: unknown;
   user_id?: string;
+  user_info?: UserInfo;
   status?: string;
   s3_node: string;
   document_id: string;
@@ -98,6 +104,7 @@ export type GraphState = {
   contextUrls?: string[];
   researchContext?: string;
   userId?: string;
+  userInfo?: UserInfo;
   projectId?: string;
   summary?: string;
   imageDocumentId?: string;
@@ -108,4 +115,82 @@ export type GraphState = {
   insights: Insight[];
   sourceTextByS3Node: Record<string, string>;
   errors: PipelineError[];
+};
+
+export type SupportingChunkRef = {
+  chunk_id: string;
+  paragraph_index?: number;
+  line_index?: number;
+};
+
+export type MetadataFilter = {
+  tag: string;
+  value?: string;
+};
+
+export type SearchFilters = {
+  user_id?: string;
+  document_id?: string;
+  status?: string;
+  parent_insight_id?: string;
+  metadata?: MetadataFilter[];
+};
+
+export type SearchPagination = {
+  limit?: number;
+  cursor?: string;
+};
+
+export type SearchQuery = {
+  query: string;
+  filters?: SearchFilters;
+  pagination?: SearchPagination;
+  include_ancestors?: boolean;
+  include_descendants?: boolean;
+  ancestor_depth?: number;
+  descendant_depth?: number;
+};
+
+export type MatchType = "primary" | "context";
+
+export type SearchResultItem = {
+  insight: Insight;
+  score: number;
+  match_type: MatchType;
+  reasons: string[];
+  distance_from_primary?: number;
+  related_primary_ids: string[];
+};
+
+export type SearchResult = {
+  query: string;
+  total: number;
+  count: number;
+  next_cursor?: string;
+  items: SearchResultItem[];
+  candidates_considered: number;
+};
+
+export type RankedInsight = {
+  insight: Insight;
+  score: number;
+  matchType: MatchType;
+  reasons: string[];
+  directScore: number;
+  hierarchyBoost: number;
+  distanceFromPrimary?: number;
+  relatedPrimaryIds: Set<string>;
+};
+
+export type PaginationSlice<T> = {
+  items: T[];
+  nextCursor?: string;
+};
+
+export type SearchIndexConfig = {
+  userIdIndexName: string;
+  documentIdIndexName: string;
+  parentInsightIdIndexName: string;
+  statusIndexName?: string;
+  userStatusIndexName?: string;
 };

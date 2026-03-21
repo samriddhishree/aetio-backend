@@ -5,6 +5,10 @@ const endpoint = new URL("/generateInsights", baseUrl).toString();
 
 const payload = {
   userId: process.env.AETIO_TEST_USER_ID ?? "f12b4500-1041-7018-dc1d-7bf79ae667c9",
+  user_info: {
+    full_name: process.env.AETIO_TEST_USER_FULL_NAME ?? "Integration Test User",
+    email_address: process.env.AETIO_TEST_USER_EMAIL ?? "integration-test@example.com",
+  },
   outputUrls: [
     process.env.AETIO_TEST_OUTPUT_URL ?? "s3://amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35/uploads/extraction/f12b4500-1041-7018-dc1d-7bf79ae667c9/0a3fd4f9-d780-4f79-80de-c8c847e9326c-233-597-1-PB.pdf",
   ],

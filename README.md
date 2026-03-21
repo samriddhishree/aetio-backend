@@ -40,3 +40,23 @@ curl -X POST http://localhost:8000/generateInsights \
     "researchContext": "Optional project summary"
   }'
 ```
+To run locally:
+```
+AWS_PROFILE=amplify-policy-348665872628 AWS_REGION=us-east-2 npm run dev
+```
+
+To delete all records:
+```
+node scripts/delete-all-insights.mjs
+```
+
+Run integration test of adding records:
+```
+npm run test:integration
+```
+
+Search:
+```
+node scripts/run-search.mjs --base-url http://localhost:8000 --path /insights/search --input scripts/search-sample-input.json
+
+```

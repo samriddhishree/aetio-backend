@@ -1,5 +1,8 @@
 import { fromTemporaryCredentials } from "@aws-sdk/credential-providers";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
+import {
+  ListUsersCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
 
 let cachedAssumeRoleProvider: AwsCredentialIdentityProvider | undefined;
 

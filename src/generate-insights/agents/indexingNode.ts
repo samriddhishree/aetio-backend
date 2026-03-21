@@ -1,5 +1,5 @@
 import type { GraphState, PipelineError } from "../../types";
-import { indexInsights } from "../services/elasticsearch";
+import { indexInsights } from "../../common/services/elasticsearch";
 
 export async function indexingNode(
   state: GraphState,

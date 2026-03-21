@@ -6,7 +6,7 @@ import {
   shouldHaveSubInsights,
   type CritiqueMap,
   type GraphStateCRV,
-} from "../services/insightMetadata";
+} from "../../common/services/insightMetadata";
 
 const addIssue = (critique: CritiqueMap, insightId: string, issue: string) => {
   critique[insightId] = critique[insightId] ?? [];

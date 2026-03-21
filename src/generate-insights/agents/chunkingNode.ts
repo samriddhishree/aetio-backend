@@ -5,8 +5,8 @@ import type {
   PipelineError,
   TextBlock,
 } from "../../types";
-import { chunkDocument } from "../services/chunking";
-import { hashId } from "../services/utils";
+import { chunkDocument } from "../../common/services/chunking";
+import { hashId } from "../../common/services/utils";
 
 const MIN_TOKENS = 500;
 const MAX_TOKENS = 1500;

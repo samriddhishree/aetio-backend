@@ -1,7 +1,7 @@
 import type { Document, GraphState, PipelineError } from "../../types";
-import { config } from "../services/config";
-import { loadDocumentText } from "../services/document-loader";
-import { hashId, mapWithConcurrency } from "../services/utils";
+import { config } from "../../common/services/config";
+import { loadDocumentText } from "../../common/services/document-loader";
+import { hashId, mapWithConcurrency } from "../../common/services/utils";
 
 export async function documentLoaderNode(
   state: GraphState,

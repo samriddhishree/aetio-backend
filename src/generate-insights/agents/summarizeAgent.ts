@@ -1,8 +1,8 @@
 import type { GraphState, PipelineError } from "../../types";
-import { config } from "../services/config";
-import { openai, OPENAI_MODEL } from "../services/openai";
-import { loadDocumentText } from "../services/document-loader";
-import { mapWithConcurrency } from "../services/utils";
+import { config } from "../../common/services/config";
+import { openai, OPENAI_MODEL } from "../../common/services/openai";
+import { loadDocumentText } from "../../common/services/document-loader";
+import { mapWithConcurrency } from "../../common/services/utils";
 
 const SUMMARY_SCHEMA = {
   type: "object",
