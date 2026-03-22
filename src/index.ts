@@ -5,6 +5,7 @@ import { handler, type GenerateInsightsArguments } from "./generate-insights/han
 import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
   deleteAllInsights,
+  deleteInsightsByProjectId,
   getInsightById,
   listInsights,
   persistInsights,
@@ -258,6 +259,21 @@ app.delete("/insights/deleteAll", async (_req: Request, res: Response) => {
   try {
     const deleted = await deleteAllInsights();
     return res.json({ deleted });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.delete("/project/:projectId", async (req: Request, res: Response) => {
+  const projectId = req.params.projectId;
+  if (!projectId) {
+    return res.status(400).json({ error: "projectId is required in path" });
+  }
+
+  try {
+    const deleted = await deleteInsightsByProjectId(projectId);
+    return res.json({ deleted, projectId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });

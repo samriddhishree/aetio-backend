@@ -239,3 +239,102 @@ export async function deleteAllInsights(): Promise<number> {
 
   return deletedCount;
 }
+
+export async function deleteInsightsByProjectId(projectId: string): Promise<number> {
+  if (!projectId) return 0;
+
+  const describe = await client.send(
+    new DescribeTableCommand({ TableName: config.ddbTableName }),
+  );
+  const keyAttributes =
+    describe.Table?.KeySchema?.map((entry) => entry.AttributeName).filter(
+      (value): value is string => Boolean(value),
+    ) ?? [];
+
+  if (keyAttributes.length === 0) {
+    throw new Error("Could not resolve table key schema.");
+  }
+
+  const expressionAttributeNames = keyAttributes.reduce<Record<string, string>>(
+    (acc, key, index) => {
+      acc[`#k${index}`] = key;
+      return acc;
+    },
+    {
+      "#project_id": "project_id",
+      "#insight_id": "insight_id",
+    },
+  );
+  const projectionExpression = keyAttributes.map((_, index) => `#k${index}`).join(", ");
+
+  let deletedCount = 0;
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const response = await docClient.send(
+      new ScanCommand({
+        TableName: config.ddbTableName,
+        ProjectionExpression: projectionExpression,
+        FilterExpression: "#project_id = :projectId OR #insight_id = :projectId",
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: {
+          ":projectId": projectId,
+        },
+        ExclusiveStartKey,
+      }),
+    );
+
+    const keys = (response.Items ?? [])
+      .map((item) => {
+        const keyObject = keyAttributes.reduce<Record<string, unknown>>((acc, key) => {
+          if (item[key] !== undefined) {
+            acc[key] = item[key];
+          }
+          return acc;
+        }, {});
+        return Object.keys(keyObject).length === keyAttributes.length ? keyObject : null;
+      })
+      .filter((item): item is Record<string, unknown> => item !== null);
+
+    if (keys.length > 0) {
+      const deleteRequests = keys.map((key) => ({
+        DeleteRequest: { Key: key },
+      })) as unknown as WriteRequest[];
+
+      const batches = chunkArray(deleteRequests, MAX_BATCH);
+      for (const batch of batches) {
+        let unprocessed = batch;
+
+        for (let attempt = 0; attempt <= MAX_RETRIES && unprocessed.length > 0; attempt += 1) {
+          const writeResponse = await docClient.send(
+            new BatchWriteCommand({
+              RequestItems: {
+                [config.ddbTableName]: unprocessed,
+              },
+            }),
+          );
+
+          const remaining = writeResponse.UnprocessedItems?.[config.ddbTableName];
+          unprocessed = (remaining ? Array.from(remaining) : []) as WriteRequest[];
+
+          if (unprocessed.length > 0) {
+            const backoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);
+            await sleep(backoffMs);
+          }
+        }
+
+        if (unprocessed.length > 0) {
+          throw new Error(
+            `Failed to delete ${unprocessed.length} project records after retries.`,
+          );
+        }
+      }
+
+      deletedCount += deleteRequests.length;
+    }
+
+    ExclusiveStartKey = response.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+
+  return deletedCount;
+}
