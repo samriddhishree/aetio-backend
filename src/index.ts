@@ -71,6 +71,10 @@ type AcceptStatusCounts = {
   countDeclined: number;
 };
 
+app.get("/health", (_req, res) => {
+  res.status(200).send("ok");
+});
+
 const toObjectRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -321,6 +325,7 @@ if (process.env.NODE_ENV !== "test") {
     await getAwsAssumeRoleProvider();
     console.log(getCachedAwsAssumeRoleProvider());
     console.log(process.env.OPENAI_API_KEY ? "OpenAI API key is set" : "OpenAI API key is NOT set");
+    console.log(process.env.UNSTRUCTURED_API_KEY ? "Unstructured API key is set" : "Unstructured API key is NOT set");
     app.listen(port, () => {
       console.log(`Aetio backend listening on port ${port}`);
     });
