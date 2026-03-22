@@ -55,8 +55,4 @@ Run integration test of adding records:
 npm run test:integration
 ```
 
-Search:
-```
-node scripts/run-search.mjs --base-url http://localhost:8000 --path /insights/search --input scripts/search-sample-input.json
-
-```
+Search has been moved to the `aetio-search` service.

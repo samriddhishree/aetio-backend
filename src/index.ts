@@ -2,18 +2,15 @@ import express, { Request, Response } from "express";
 import cors from 'cors';
 import crypto from "crypto";
 import { handler, type GenerateInsightsArguments } from "./generate-insights/handler";
+import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
   deleteAllInsights,
+  getInsightById,
   listInsights,
   persistInsights,
   type InsightFilters,
   type InsightFilterKey,
 } from "./common/services/dynamo";
-import {
-  InsightSearchRepository,
-  InsightSearchService,
-  type SearchQuery,
-} from "./search";
 
 import type { Insight } from "./types";
 
@@ -28,7 +25,6 @@ type FormattedInsight = Insight & {
 
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
-const insightSearchService = new InsightSearchService(new InsightSearchRepository());
 const allowedOrigins = ['http://localhost:5001']; // Replace with your frontend origins
 // CORS middleware
 app.use(cors({
@@ -175,6 +171,25 @@ app.get("/insights", async (req: Request, res: Response) => {
   }
 });
 
+app.get("/insight/:insightId", async (req: Request, res: Response) => {
+  const insightId = req.params.insightId;
+  if (!insightId) {
+    return res.status(400).json({ error: "insightId is required in path" });
+  }
+
+  try {
+    console.log("getInsightById:start", { insightId });
+    const insight = await getInsightById(insightId);
+    if (!insight) {
+      return res.status(404).json({ error: `Insight not found: ${insightId}` });
+    }
+    return res.json(insight);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
 app.get("/formatted-insights", async (req: Request, res: Response) => {
   const parsedFilters = extractInsightFilters(req.query);
   if ("error" in parsedFilters) {
@@ -185,29 +200,6 @@ app.get("/formatted-insights", async (req: Request, res: Response) => {
     const items = await listInsights(parsedFilters);
     const formattedItems = formatInsights(items);
     return res.json({ count: formattedItems.length, items: formattedItems });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return res.status(500).json({ error: message });
-  }
-});
-
-app.post("/insights/search", async (req: Request, res: Response) => {
-  const body = req.body as Partial<SearchQuery> | undefined;
-  if (!body || typeof body.query !== "string") {
-    return res.status(400).json({ error: "Body must include { query: string }" });
-  }
-
-  try {
-    const result = await insightSearchService.searchInsights({
-      query: body.query,
-      filters: body.filters,
-      pagination: body.pagination,
-      include_ancestors: body.include_ancestors,
-      include_descendants: body.include_descendants,
-      ancestor_depth: body.ancestor_depth,
-      descendant_depth: body.descendant_depth,
-    });
-    return res.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
@@ -281,9 +273,13 @@ app.post("/generateInsights", async (req: Request, res: Response) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-  app.listen(port, () => {
-    console.log(`Aetio backend listening on port ${port}`);
-  });
+  void (async () => {
+    await getAwsAssumeRoleProvider();
+    console.log(getCachedAwsAssumeRoleProvider());
+    app.listen(port, () => {
+      console.log(`Aetio backend listening on port ${port}`);
+    });
+  })();
 }
 
 export { app };

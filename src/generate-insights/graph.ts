@@ -165,6 +165,16 @@ export async function summarizeProject(
   };
 
   const result = await summarizeAgent(state);
+  const summarizeErrors = (result.errors ?? []).filter(
+    (error) => error.stage === "SummarizeAgent",
+  );
+  if (summarizeErrors.length > 0) {
+    const firstError = summarizeErrors[0];
+    const errorDetails = firstError.url
+      ? `${firstError.message} (url: ${firstError.url})`
+      : firstError.message;
+    throw new Error(`SummarizeAgent failed: ${errorDetails}`);
+  }
   const summary = result.summary?.trim() ?? "";
 
   if (!summary) {

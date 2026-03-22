@@ -26,9 +26,10 @@ export const config: Config = {
   elasticNode: process.env.ELASTIC_NODE ?? "",
   elasticIndex: process.env.ELASTIC_INDEX ?? "user_id",
   documentsBucket: process.env.DOCUMENTS_BUCKET ?? "documents",
-  unstructuredApiKey: process.env.UNSTRUCTURED_API_KEY ?? "7NswlME2XLHasX9Qiebp4ETR4keNqO",
-  unstructuredApiUrl: process.env.UNSTRUCTURED_API_URL ?? "",
-  awsRegion: process.env.AWS_REGION ?? "us-east-1",
+  //unstructuredApiKey: process.env.UNSTRUCTURED_API_KEY ?? "7NswlME2XLHasX9Qiebp4ETR4keNqO",
+  unstructuredApiKey: "mrNs15cbyjI6NjtYswzzsKa67iIFsn",
+  unstructuredApiUrl: process.env.UNSTRUCTURED_API_URL ?? "https://api.unstructuredapp.io",
+  awsRegion: process.env.AWS_REGION ?? "us-east-2",
   cognitoUserPoolId: process.env.COGNITO_USER_POOL_ID?.trim(),
 };
 

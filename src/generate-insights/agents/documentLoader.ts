@@ -7,13 +7,11 @@ export async function documentLoaderNode(
   state: GraphState,
 ): Promise<Partial<GraphState>> {
   console.debug("DocumentLoader:start", { urls: state.outputUrls.length });
-  const errors: PipelineError[] = [];
-
-  const documents = await mapWithConcurrency(
-    state.outputUrls,
-    config.maxConcurrency,
-    async (url) => {
-      try {
+  try {
+    const documents = await mapWithConcurrency(
+      state.outputUrls,
+      config.maxConcurrency,
+      async (url) => {
         const { text } = await loadDocumentText(url);
         const document: Document = {
           document_id: hashId(url),
@@ -21,20 +19,22 @@ export async function documentLoaderNode(
           text,
         };
         return document;
-      } catch (error) {
-        errors.push({
-          stage: "DocumentLoader",
-          message: error instanceof Error ? error.message : "Unknown error",
-          url,
-          cause: error,
-        });
-        return null;
-      }
-    },
-  );
+      },
+    );
 
-  return {
-    documents: documents.filter(Boolean) as Document[],
-    errors: state.errors.concat(errors),
-  };
+    return {
+      documents,
+      errors: state.errors,
+    };
+  } catch (error) {
+    const pipelineError: PipelineError = {
+      stage: "DocumentLoader",
+      message: error instanceof Error ? error.message : "Unknown error",
+      cause: error,
+    };
+    throw new Error(
+      `DocumentLoader failed: ${pipelineError.message}`,
+      { cause: pipelineError },
+    );
+  }
 }

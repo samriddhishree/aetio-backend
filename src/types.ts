@@ -169,6 +169,18 @@ export type SearchResult = {
   next_cursor?: string;
   items: SearchResultItem[];
   candidates_considered: number;
+  primary_results: Insight[];
+  contextual_results: Insight[];
+  explored_paths: SearchExploredPath[];
+  reasoning_summary: string;
+  relevance_scores?: Record<string, number>;
+};
+
+export type SearchExploredPath = {
+  step: number;
+  action: string;
+  insight_ids?: string[];
+  rationale?: string;
 };
 
 export type RankedInsight = {

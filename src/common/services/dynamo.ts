@@ -3,15 +3,16 @@ import { DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   BatchWriteCommand,
   DynamoDBDocumentClient,
+  QueryCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type { Insight } from "../../types";
-import { getAwsAssumeRoleProvider } from "./aws";
+import { getCachedAwsAssumeRoleProvider } from "./aws";
 import { config } from "./config";
 import { chunkArray, sleep } from "./utils";
 
 const client = new DynamoDBClient({
-  credentials: getAwsAssumeRoleProvider(),
+  credentials: getCachedAwsAssumeRoleProvider(),
 });
 const docClient = DynamoDBDocumentClient.from(client);
 
@@ -127,6 +128,27 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
 
   console.log("listInsights:done", items, items.length);
   return items;
+}
+
+export async function getInsightById(insightId: string): Promise<Insight | undefined> {
+  if (!insightId) return undefined;
+
+  const response = await docClient.send(
+    new QueryCommand({
+      TableName: config.ddbTableName,
+      IndexName: "GSI_insight_id",
+      KeyConditionExpression: "#insight_id = :insight_id",
+      ExpressionAttributeNames: {
+        "#insight_id": "insight_id",
+      },
+      ExpressionAttributeValues: {
+        ":insight_id": insightId,
+      },
+      Limit: 1,
+    }),
+  );
+  console.log("getInsightById", { response});
+  return (response.Items?.[0] as Insight | undefined) ?? undefined;
 }
 
 export async function deleteAllInsights(): Promise<number> {
