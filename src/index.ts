@@ -320,6 +320,7 @@ if (process.env.NODE_ENV !== "test") {
   void (async () => {
     await getAwsAssumeRoleProvider();
     console.log(getCachedAwsAssumeRoleProvider());
+    console.log(process.env.OPENAI_API_KEY ? "OpenAI API key is set" : "OpenAI API key is NOT set");
     app.listen(port, () => {
       console.log(`Aetio backend listening on port ${port}`);
     });

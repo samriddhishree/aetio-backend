@@ -4,7 +4,7 @@
   "private": true,
   "main": "dist/index.js",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "dev": "ts-node-dev --env-file=.env --respawn --transpile-only src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "npm i && npm run build && node dist/index.js",
     "test": "vitest run",
@@ -19,6 +19,7 @@
     "@elastic/elasticsearch": "^8.15.0",
     "@langchain/langgraph": "^0.2.0",
     "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
     "express": "^4.19.2",
     "openai": "^4.58.2",
     "unstructured-client": "^0.16.0"

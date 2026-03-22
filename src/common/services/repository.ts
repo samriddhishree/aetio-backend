@@ -664,7 +664,11 @@ export class InsightSearchRepository {
     const items: Insight[] = [];
     let lastEvaluatedKey: Record<string, unknown> | undefined;
     let pages = 0;
-
+    console.debug("scanByEqualities:start", {
+      tableName: this.tableName,
+      conditions,
+      maxItems,
+    });
     while (items.length < maxItems && pages < this.maxQueryPages) {
       const response = await this.docClient.send(
         new ScanCommand({
