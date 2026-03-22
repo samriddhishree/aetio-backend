@@ -11,6 +11,7 @@ import {
   type InsightFilters,
   type InsightFilterKey,
 } from "./common/services/dynamo";
+import { InsightSearchRepository } from "./common/services/repository";
 
 import type { Insight } from "./types";
 
@@ -23,8 +24,16 @@ type FormattedInsight = Insight & {
   sub_insights?: Insight[];
 };
 
+type InsightTreeResponse = {
+  insight: Insight[];
+  children: Insight[];
+  parents: Insight[];
+  siblings: Insight[];
+};
+
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
+const insightSearchRepository = new InsightSearchRepository();
 const allowedOrigins = ['http://localhost:5001']; // Replace with your frontend origins
 // CORS middleware
 app.use(cors({
@@ -184,6 +193,38 @@ app.get("/insight/:insightId", async (req: Request, res: Response) => {
       return res.status(404).json({ error: `Insight not found: ${insightId}` });
     }
     return res.json(insight);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/insight/tree/:insightId", async (req: Request, res: Response) => {
+  const insightId = req.params.insightId;
+  if (!insightId) {
+    return res.status(400).json({ error: "insightId is required in path" });
+  }
+
+  try {
+    const insight = await insightSearchRepository.getInsightById(insightId);
+    if (!insight) {
+      return res.status(404).json({ error: `Insight not found: ${insightId}` });
+    }
+
+    const [children, parent, siblings] = await Promise.all([
+      insightSearchRepository.getChildInsights(insightId, 200),
+      insightSearchRepository.getParentInsight(insightId),
+      insightSearchRepository.getSiblingInsights(insightId, 200),
+    ]);
+
+    const response: InsightTreeResponse = {
+      insight: [insight],
+      children,
+      parents: parent ? [parent] : [],
+      siblings,
+    };
+
+    return res.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });

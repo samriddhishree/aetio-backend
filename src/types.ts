@@ -200,6 +200,7 @@ export type PaginationSlice<T> = {
 };
 
 export type SearchIndexConfig = {
+  insightIdIndexName?: string;
   userIdIndexName: string;
   documentIdIndexName: string;
   parentInsightIdIndexName: string;
