@@ -34,7 +34,7 @@ type InsightTreeResponse = {
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
 const insightSearchRepository = new InsightSearchRepository();
-const allowedOrigins = ['http://localhost:5001']; // Replace with your frontend origins
+const allowedOrigins = ['http://localhost:5001','https://main.d27ng47b6pfw44.amplifyapp.com']; // Replace with your frontend origins
 // CORS middleware
 app.use(cors({
   origin: (
