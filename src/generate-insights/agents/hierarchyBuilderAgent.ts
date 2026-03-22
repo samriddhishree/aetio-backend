@@ -191,8 +191,8 @@ export async function hierarchyBuilderAgent(
       const parsed = JSON.parse(content) as HierarchyResponse;
       console.debug("HierarchyBuilderAgent:parsed-response", JSON.stringify(parsed));
       for (const group of parsed.groups ?? []) {
-        const groupInsight = insightById.has(group.group_id)
-        if (group.insight_ids.length === 0 || groupInsight) continue;
+        const groupInsight = insightById.get(group.group_id);
+        if (group.insight_ids.length === 0 || !groupInsight) continue;
         
         for (const memberId of group.insight_ids) {
           const member = insightById.get(memberId);

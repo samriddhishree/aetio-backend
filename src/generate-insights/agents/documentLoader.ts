@@ -32,9 +32,8 @@ export async function documentLoaderNode(
       message: error instanceof Error ? error.message : "Unknown error",
       cause: error,
     };
-    throw new Error(
-      `DocumentLoader failed: ${pipelineError.message}`,
-      { cause: pipelineError },
-    );
+    const wrapped = new Error(`DocumentLoader failed: ${pipelineError.message}`);
+    (wrapped as Error & { cause?: unknown }).cause = pipelineError;
+    throw wrapped;
   }
 }

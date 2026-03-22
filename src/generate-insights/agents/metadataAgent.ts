@@ -63,6 +63,23 @@ function normalizeMetadata(metadata?: MetadataResponse["metadata"]) {
   return hasValues ? cleaned : undefined;
 }
 
+function toMetadataEntries(metadata?: MetadataResponse["metadata"]): Insight["metadata"] {
+  const cleaned = normalizeMetadata(metadata);
+  if (!cleaned) return undefined;
+
+  const entries: NonNullable<Insight["metadata"]> = [];
+  if (cleaned.topic) entries.push({ tag: "topic", value: cleaned.topic, confidence: 0.7 });
+  if (cleaned.region) entries.push({ tag: "region", value: cleaned.region, confidence: 0.7 });
+  if (cleaned.timeframe) {
+    entries.push({ tag: "timeframe", value: cleaned.timeframe, confidence: 0.7 });
+  }
+  if (cleaned.tags && cleaned.tags.length > 0) {
+    entries.push({ tag: "tags", value: cleaned.tags.join(", "), confidence: 0.7 });
+  }
+
+  return entries.length > 0 ? entries : undefined;
+}
+
 export async function metadataAgent(
   state: GraphState,
 ): Promise<Partial<GraphState>> {
@@ -118,7 +135,7 @@ export async function metadataAgent(
         if (!content) throw new Error("Empty OpenAI response.");
 
         const parsed = JSON.parse(content) as MetadataResponse;
-        const metadata = normalizeMetadata(parsed.metadata);
+        const metadata = toMetadataEntries(parsed.metadata);
         return metadata ? { ...insight, metadata } : insight;
       } catch (error) {
         errors.push({

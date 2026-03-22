@@ -86,7 +86,7 @@ async function extractPdfWithUnstructured(
           content: fileBuffer,
           fileName,
         },
-        strategy: "hi_res",
+        strategy: Strategy.HiRes,
         splitPdfPage: true,
         splitPdfAllowFailed: true,
         splitPdfConcurrencyLevel: 8,
@@ -269,7 +269,8 @@ export async function loadDocumentText(url: string): Promise<LoadedDocument> {
       let text = decoder.decode(buffer);
       if (contentType.includes("application/pdf")) {
         console.debug("document-loader:load:s3:parse:pdf", { url, contentType });
-        text = await extractPdfWithUnstructured(url, buffer);
+        const arrayBuffer = Uint8Array.from(buffer).buffer;
+        text = await extractPdfWithUnstructured(url, arrayBuffer);
       } else if (
         contentType.includes("text/html") ||
         contentType.includes("application/xhtml+xml")

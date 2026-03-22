@@ -102,12 +102,11 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
     conditions.push(`${nameKey} = ${valueKey}`);
   }
 
-  let ExclusiveStartKey: Record<string, unknown> | undefined;
-  let lastEvaluatedKey;
+  let lastEvaluatedKey: Record<string, unknown> | undefined;
 
   const items: Insight[] = [];
   console.log("constraints", conditions);
-    do {
+  do {
     const response = await docClient.send(
       new ScanCommand({
         TableName: config.ddbTableName,
@@ -122,7 +121,7 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
       })
     );
 
-    items.push(...(response.Items ?? []));
+    items.push(...((response.Items ?? []) as Insight[]));
     lastEvaluatedKey = response.LastEvaluatedKey;
   } while (lastEvaluatedKey);
 
