@@ -5,6 +5,7 @@ import {
   DynamoDBDocumentClient,
   QueryCommand,
   ScanCommand,
+  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type { Insight } from "../../types";
 import { getCachedAwsAssumeRoleProvider } from "./aws";
@@ -67,6 +68,73 @@ export async function persistInsights(insights: Insight[]): Promise<void> {
     }
   }
   console.debug("dynamo:persist:done", { count: insights.length });
+}
+
+export async function updateInsight(insight: Insight): Promise<void> {
+  if (!insight.insight_id) {
+    throw new Error("updateInsight requires insight.insight_id");
+  }
+
+  const { insight_id: insightId, ...rest } = insight;
+  const updatableEntries = Object.entries(rest).filter(([, value]) => value !== undefined);
+
+  if (updatableEntries.length === 0) {
+    console.warn("dynamo:update:skip", {
+      insightId,
+      reason: "no_updatable_fields",
+    });
+    return;
+  }
+
+  const expressionAttributeNames: Record<string, string> = {
+    "#insight_id": "insight_id",
+  };
+  const expressionAttributeValues: Record<string, unknown> = {};
+  const setExpressions: string[] = [];
+
+  updatableEntries.forEach(([key, value], index) => {
+    const nameKey = `#f${index}`;
+    const valueKey = `:v${index}`;
+    expressionAttributeNames[nameKey] = key;
+    expressionAttributeValues[valueKey] = value;
+    setExpressions.push(`${nameKey} = ${valueKey}`);
+  });
+
+  console.debug("dynamo:update:start", {
+    insightId,
+    fieldCount: updatableEntries.length,
+  });
+
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: config.ddbTableName,
+        Key: { insight_id: insightId },
+        UpdateExpression: `SET ${setExpressions.join(", ")}`,
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ConditionExpression: "attribute_exists(insight_id)",
+      }),
+    );
+
+    console.debug("dynamo:update:done", {
+      insightId,
+      fieldCount: updatableEntries.length,
+    });
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "name" in error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
+      console.warn("dynamo:update:not_found", { insightId, error });
+      throw new Error(`Insight not found for update: ${insightId}`);
+    }
+
+    console.error("dynamo:update:failed", { insightId, error });
+    throw error;
+  }
 }
 
 export async function listInsights(filters: InsightFilters = {}): Promise<Insight[]> {
