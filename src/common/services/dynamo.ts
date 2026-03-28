@@ -136,7 +136,7 @@ export async function updateInsight(insight: Insight): Promise<void> {
     throw error;
   }
 }
-
+// TODO: Get rid of Scan
 export async function listInsights(filters: InsightFilters = {}): Promise<Insight[]> {
   const filterEntries = Object.entries(filters).filter(([, value]) => value !== undefined);
   const names: Record<string, string> = {};

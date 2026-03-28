@@ -61,7 +61,6 @@ const allowedInsightFilters: InsightFilterKey[] = [
   "project_id",
   "parent_insight_id",
   "text",
-  "user_id",
   "status",
   "s3_node",
   "document_id",
@@ -180,7 +179,8 @@ app.get("/insights", async (req: Request, res: Response) => {
   }
 
   try {
-    const items = await listInsights(parsedFilters);
+    const effectiveFilters = applyJwtUserIdFilter(req, parsedFilters);
+    const items = await listInsights(effectiveFilters);
     return res.json({ count: items.length, items });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -246,7 +246,8 @@ app.get("/formatted-insights", async (req: Request, res: Response) => {
   }
 
   try {
-    const items = await listInsights(parsedFilters);
+    const effectiveFilters = applyJwtUserIdFilter(req, parsedFilters);
+    const items = await listInsights(effectiveFilters);
     const formattedItems = formatInsights(items);
     return res.json({ count: formattedItems.length, items: formattedItems });
   } catch (error) {
@@ -311,11 +312,15 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
 });
 
 app.post("/generateInsights", async (req: Request, res: Response) => {
-  const payload = req.body as GenerateInsightsArguments;
-  console.log("payload", payload)
-  if (!payload?.userId) {
-    return res.status(400).json({ error: "userId is required" });
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
   }
+  const payload = {
+    ...toObjectRecord(req.body),
+    userId: jwtUserId,
+  } as GenerateInsightsArguments;
+  console.log("payload", payload);
   if (!payload?.outputUrls || payload.outputUrls.length === 0) {
     return res.status(400).json({ error: "outputUrls is required" });
   }
@@ -349,3 +354,49 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export { app };
+
+const applyJwtUserIdFilter = (req: Request, filters: InsightFilters): InsightFilters => {
+  const output: InsightFilters = { ...filters };
+  delete output.user_id;
+
+  const userId = getJwtUserId(req);
+  if (userId) {
+    output.user_id = userId;
+  }
+
+  return output;
+};
+
+const getJwtUserId = (req: Request): string | undefined => {
+  const token = parseBearerToken(req);
+  if (!token) return undefined;
+
+  const payload = decodeJwtPayload(token);
+  if (!payload) return undefined;
+
+  const sub = payload.sub;
+  return typeof sub === "string" && sub.trim().length > 0 ? sub.trim() : undefined;
+};
+
+const parseBearerToken = (req: Request): string | undefined => {
+  const rawAuthorization = req.header("authorization");
+  if (!rawAuthorization) return undefined;
+  const match = rawAuthorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim();
+};
+
+const decodeJwtPayload = (token: string): Record<string, unknown> | undefined => {
+  const segments = token.split(".");
+  if (segments.length < 2) return undefined;
+
+  try {
+    const base64 = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padding = base64.length % 4 === 0 ? "" : "=".repeat(4 - (base64.length % 4));
+    const decoded = Buffer.from(base64 + padding, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+};

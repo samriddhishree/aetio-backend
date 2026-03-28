@@ -1,10 +1,12 @@
 import assert from "assert";
+import { getCognitoJwtToken } from "../test/cognito-test-auth.mjs";
 
 const baseUrl = process.env.AETIO_BACKEND_URL ?? "http://localhost:8000";
 const endpoint = new URL("/generateInsights", baseUrl).toString();
+const jwtToken = await getCognitoJwtToken();
+const jwtUserId = decodeJwtSub(jwtToken);
 
 const payload = {
-  userId: process.env.AETIO_TEST_USER_ID ?? "f12b4500-1041-7018-dc1d-7bf79ae667c9",
   user_info: {
     full_name: process.env.AETIO_TEST_USER_FULL_NAME ?? "Integration Test User",
     email_address: process.env.AETIO_TEST_USER_EMAIL ?? "integration-test@example.com",
@@ -20,7 +22,10 @@ const payload = {
 
 const response = await fetch(endpoint, {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: {
+    "content-type": "application/json",
+    Authorization: `Bearer ${jwtToken}`,
+  },
   body: JSON.stringify(payload),
 });
 
@@ -42,11 +47,16 @@ console.log(response);
 //assert.ok (response?.insights > 0, "Expected non-zero insights");
 
 const insightsEndpoint = new URL(
-  `/insights?user_id=${encodeURIComponent(payload.userId)}&parent_insight_id=null`,
+  "/insights?parent_insight_id=null",
   baseUrl,
 ).toString();
 
-const insightsResponse = await fetch(insightsEndpoint, { method: "GET" });
+const insightsResponse = await fetch(insightsEndpoint, {
+  method: "GET",
+  headers: {
+    Authorization: `Bearer ${jwtToken}`,
+  },
+});
 const insightsText = await insightsResponse.text();
 let insightsData;
 try {
@@ -65,7 +75,7 @@ assert.ok(Array.isArray(insightsData.items), "Expected items array from /insight
 
 if (insightsData.items.length > 0) {
   for (const item of insightsData.items) {
-    assert.equal(item.user_id, payload.userId, "Expected user_id filter to match");
+    assert.equal(item.user_id, jwtUserId, "Expected user_id to match JWT sub");
     assert.ok(
       !("parent_insight_id" in item) || item.parent_insight_id == null,
       "Expected parent_insight_id to be null or missing",
@@ -76,5 +86,23 @@ if (insightsData.items.length > 0) {
 console.log("Integration test passed", {
   status: data.status,
   requestId: data.requestId,
+  jwtUserId,
   insightCount: insightsData?.count,
 });
+
+function decodeJwtSub(token) {
+  const segments = token.split(".");
+  if (segments.length < 2) {
+    throw new Error("Invalid JWT token format");
+  }
+
+  const base64 = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+  const padding = base64.length % 4 === 0 ? "" : "=".repeat(4 - (base64.length % 4));
+  const decoded = Buffer.from(base64 + padding, "base64").toString("utf8");
+  const payload = JSON.parse(decoded);
+  const sub = typeof payload?.sub === "string" ? payload.sub.trim() : "";
+  if (!sub) {
+    throw new Error("JWT token is missing sub claim");
+  }
+  return sub;
+}

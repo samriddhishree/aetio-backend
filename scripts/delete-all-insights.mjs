@@ -1,12 +1,15 @@
 import assert from "assert";
+import { getCognitoJwtToken } from "../test/cognito-test-auth.mjs";
 
 const baseUrl = process.env.AETIO_BACKEND_URL ?? "http://localhost:8000";
 const endpoint = new URL("/insights/deleteAll", baseUrl).toString();
+const jwtToken = await getCognitoJwtToken();
 
 const response = await fetch(endpoint, {
   method: "DELETE",
   headers: {
     "content-type": "application/json",
+    Authorization: `Bearer ${jwtToken}`,
   },
 });
 

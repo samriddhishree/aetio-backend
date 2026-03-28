@@ -3,6 +3,7 @@ import http from "http";
 import https from "https";
 import path from "path";
 import { fileURLToPath } from "url";
+import { getCognitoJwtToken } from "../test/cognito-test-auth.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +23,8 @@ const body = JSON.stringify(payload);
 const isHttps = url.protocol === "https:";
 const client = isHttps ? https : http;
 
+const jwtToken = await getCognitoJwtToken();
+
 const options = {
   method: "POST",
   hostname: url.hostname,
@@ -30,6 +33,7 @@ const options = {
   headers: {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(body),
+    Authorization: `Bearer ${jwtToken}`,
   },
 };
 
