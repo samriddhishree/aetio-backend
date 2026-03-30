@@ -6,6 +6,7 @@ import { hashId, mapWithConcurrency } from "../../common/services/utils";
 export async function documentLoaderNode(
   state: GraphState,
 ): Promise<Partial<GraphState>> {
+  console.log("DocumentLoader:size", state.insights?.length ?? 0);
   console.debug("DocumentLoader:start", { urls: state.outputUrls.length });
   try {
     const documents = await mapWithConcurrency(

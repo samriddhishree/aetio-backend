@@ -5,8 +5,10 @@ import type {
   PipelineError,
   TextBlock,
 } from "../../types";
+import { config } from "../../common/services/config";
 import { chunkDocument } from "../../common/services/chunking";
-import { hashId } from "../../common/services/utils";
+import { hashId, mapWithConcurrency } from "../../common/services/utils";
+import { uploadChunkToS3 } from "../../common/services/s3";
 
 const MIN_TOKENS = 500;
 const MAX_TOKENS = 1500;
@@ -24,14 +26,13 @@ function buildTextChunk(
   content: string,
 ) {
   const chunkId = hashId(`${documentId}:text:${index}`);
-  const s3Node = `source:${sourceUrl}#chunk:${index}`;
   return {
     chunk_id: chunkId,
     document_id: documentId,
     type: "text" as const,
     content: content.trim(),
     block_ids: blocks.map((block) => block.block_id),
-    s3_node: s3Node,
+    s3_node: "",
     source_url: sourceUrl,
     page: blocks[0]?.page,
   };
@@ -42,7 +43,6 @@ function buildImageChunk(
   block: ImageContentBlock,
 ) {
   const chunkId = hashId(`${documentId}:image:${block.block_id}`);
-  const s3Node = `source:${block.source_image}`;
   return {
     chunk_id: chunkId,
     document_id: documentId,
@@ -51,7 +51,7 @@ function buildImageChunk(
     source_image: block.source_image,
     page: block.page,
     block_ids: [block.block_id],
-    s3_node: s3Node,
+    s3_node: "",
   };
 }
 
@@ -66,6 +66,7 @@ function isTextBlock(block: ContentBlock): block is TextBlock {
 export async function chunkingNode(
   state: GraphState,
 ): Promise<Partial<GraphState>> {
+  console.log("ChunkingNode:size", state.insights?.length ?? 0);
   console.debug("ChunkingNode:start", {
     documents: state.documents.length,
     blocks: state.documents.reduce((sum, doc) => sum + (doc.blocks?.length ?? 0), 0),
@@ -93,7 +94,6 @@ export async function chunkingNode(
             content,
           );
           allChunks.push(chunk);
-          sourceTextByS3Node[chunk.s3_node] = chunk.content;
           textChunkIndex += 1;
           currentBlocks = [];
           currentContent = [];
@@ -105,7 +105,6 @@ export async function chunkingNode(
             flushTextChunk();
             const chunk = buildImageChunk(document.document_id, block);
             allChunks.push(chunk);
-            sourceTextByS3Node[chunk.s3_node] = chunk.content;
             continue;
           }
 
@@ -128,9 +127,8 @@ export async function chunkingNode(
 
         flushTextChunk();
       } else {
-        const { chunks, sourceTextByS3Node: sourceMap } = chunkDocument(document);
+        const { chunks } = chunkDocument(document);
         allChunks.push(...chunks);
-        Object.assign(sourceTextByS3Node, sourceMap);
       }
     } catch (error) {
       errors.push({
@@ -140,6 +138,40 @@ export async function chunkingNode(
         cause: error,
       });
     }
+  }
+
+  if (process.env.NODE_ENV === "test") {
+    console.debug("ChunkingNode:upload:skipped", {
+      reason: "test-environment",
+      chunks: allChunks.length,
+    });
+  } else {
+    console.debug("ChunkingNode:upload:start", {
+      chunks: allChunks.length,
+      bucket: config.documentsBucket,
+    });
+
+    await mapWithConcurrency(allChunks, config.maxConcurrency, async (chunk) => {
+      try {
+        const uploadResult = await uploadChunkToS3(chunk, state.userId);
+        chunk.s3_node = uploadResult.s3Url;
+        sourceTextByS3Node[uploadResult.s3Url] = chunk.content;
+      } catch (error) {
+        errors.push({
+          stage: "ChunkingNode",
+          message: `Failed to upload chunk ${chunk.chunk_id} to S3: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`,
+          document_id: chunk.document_id,
+          cause: error,
+        });
+      }
+    });
+
+    console.debug("ChunkingNode:upload:end", {
+      chunks: allChunks.length,
+      uploadErrors: errors.length,
+    });
   }
 
   return {

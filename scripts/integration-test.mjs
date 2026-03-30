@@ -12,12 +12,11 @@ const payload = {
     email_address: process.env.AETIO_TEST_USER_EMAIL ?? "integration-test@example.com",
   },
   outputUrls: [
-    process.env.AETIO_TEST_OUTPUT_URL ?? "s3://amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35/uploads/extraction/f12b4500-1041-7018-dc1d-7bf79ae667c9/0a3fd4f9-d780-4f79-80de-c8c847e9326c-233-597-1-PB.pdf",
+    process.env.AETIO_TEST_OUTPUT_URL ?? "s3://amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35/uploads/extraction/f12b4500-1041-7018-dc1d-7bf79ae667c9/358524e1-77f8-4f88-a8b7-ede93ef095d7-nutrients-13-03305.pdf",
   ],
   contextUrls: [
-    process.env.AETIO_TEST_CONTEXT_URL ?? "s3://amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35/uploads/extraction/f12b4500-1041-7018-dc1d-7bf79ae667c9/0a3fd4f9-d780-4f79-80de-c8c847e9326c-233-597-1-PB.pdf", //"s3://amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35/uploads/extraction/f12b4500-1041-7018-dc1d-7bf79ae667c9/800ef94d-c066-45d7-ad17-5252c9a6b4bb-5-6-2024_TKH_Hackathon_Demos_Outline___Agenda.pdf",
-  ],
-  researchContext: "Integration test run",
+     ],
+  researchContext: "Effects of nutrition",
 };
 
 const response = await fetch(endpoint, {

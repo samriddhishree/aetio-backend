@@ -11,22 +11,35 @@ export type InsightMetadataEntry = {
   confidence?: number;
 };
 
+export type InsightConfidence = {
+  score: number;
+  reasoning: string;
+};
+
 export type UserInfo = {
   full_name?: string;
   email_address?: string;
 };
 
+export type SupportingChunkRef = {
+  chunk_id: string;
+  paragraph_index?: number;
+  line_index?: number;
+};
+
+export type FindingEvidenceType = "quantitative" | "qualitative" | "mixed";
+
 export type Insight = {
   insight_id: string;
-  parent_insight_id?: string;
+  parent_insight_id?: string | null;
   project_id?: string;
+  createdAt?: string;
+  updatedAt?: string;
   text: string;
-  supporting_chunks?: Array<{
-    chunk_id: string;
-    paragraph_index?: number;
-    line_index?: number;
-  }>;
+  supporting_chunks?: SupportingChunkRef[];
+  findings?: FindingRef[];
   metadata?: InsightMetadataEntry[];
+  confidence?: InsightConfidence;
   additional_refs?: unknown;
   user_id?: string;
   user_info?: UserInfo;
@@ -91,6 +104,46 @@ export type ImageChunk = {
   block_ids: string[];
 };
 
+export type Finding = {
+  finding_id: string;
+  text: string;
+  evidence_snipped: string;
+  evidence_type: FindingEvidenceType;
+  supporting_chunks: SupportingChunkRef[];
+  document_id: string;
+  s3_node: string;
+  metric?: string;
+  value?: string;
+  comparison?: string;
+  segment?: string;
+  timeframe?: string;
+};
+
+export type FindingBatch = {
+  batch_id: string;
+  findings: Finding[];
+};
+
+export type BatchInsightResult = {
+  batch_id: string;
+  insights: Insight[];
+};
+
+export type FindingRef = {
+  finding_id: string;
+  text?: string;
+  evidence_snipped?: string;
+  evidence_type?: string;
+  supporting_chunks?: SupportingChunkRef[];
+  document_id?: string;
+  s3_node?: string;
+  metric?: string;
+  value?: string;
+  comparison?: string;
+  segment?: string;
+  timeframe?: string;
+};
+
 export type PipelineError = {
   stage: string;
   message: string;
@@ -111,16 +164,13 @@ export type GraphState = {
   imageBlocks: ImageBlock[];
   documents: Document[];
   chunks: Chunk[];
+  findings: Finding[];
+  finding_batches: FindingBatch[];
+  batch_insights: BatchInsightResult[];
   imageChunks: ImageChunk[];
   insights: Insight[];
   sourceTextByS3Node: Record<string, string>;
   errors: PipelineError[];
-};
-
-export type SupportingChunkRef = {
-  chunk_id: string;
-  paragraph_index?: number;
-  line_index?: number;
 };
 
 export type MetadataFilter = {

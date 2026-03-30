@@ -19,6 +19,12 @@ type SummaryResponse = {
 
 async function summarizeText(text: string): Promise<string> {
   console.debug("SummarizeAgent:summarizeText:start", { length: text.length });
+  console.log(
+    "SummarizeAgent:summarizeText:llm-input-sample",
+    JSON.stringify({
+      text_preview: text.slice(0, 240),
+    }),
+  );
   const response = await openai.chat.completions.create({
     model: OPENAI_MODEL,
     temperature: 0.2,
@@ -59,6 +65,13 @@ async function combineSummaries(
     inSummaryLength: inSummary.length,
     summaries: summaries.length,
   });
+  console.log(
+    "SummarizeAgent:combine:llm-input-sample",
+    JSON.stringify({
+      input_summary_preview: inSummary.slice(0, 200),
+      first_summary_preview: summaries[0]?.slice(0, 200),
+    }),
+  );
   const response = await openai.chat.completions.create({
     model: OPENAI_MODEL,
     temperature: 0.2,
@@ -96,6 +109,7 @@ async function combineSummaries(
 export async function summarizeAgent(
   state: GraphState,
 ): Promise<Partial<GraphState>> {
+  console.log("SummarizeAgent:size", state.insights?.length ?? 0);
   console.debug("SummarizeAgent:start", {
     contextUrls: state.contextUrls?.length ?? 0,
     hasResearchContext: Boolean(state.researchContext?.trim()),

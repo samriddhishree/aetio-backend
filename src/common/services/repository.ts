@@ -106,7 +106,11 @@ export class InsightSearchRepository {
       ...DEFAULT_INDEX_CONFIG,
       ...options.indexConfig,
     };
-    this.docClient = options.documentClient ?? DynamoDBDocumentClient.from(ddbClient);
+    this.docClient = options.documentClient ?? DynamoDBDocumentClient.from(ddbClient, {
+      marshallOptions: {
+        removeUndefinedValues: true,
+      },
+    });
     this.maxQueryPages = options.maxQueryPages ?? 5;
     this.queryPageSize = options.queryPageSize ?? 200;
   }

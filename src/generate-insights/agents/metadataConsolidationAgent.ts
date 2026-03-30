@@ -7,6 +7,7 @@ export class MetadataConsolidationAgent {
   // Input: insights[]
   // Output: insights[] with minimal, consolidated metadata tags
   async process(state: GraphStateCRV): Promise<Partial<GraphStateCRV>> {
+    console.log("MetadataConsolidationAgent:size", state.insights?.length ?? 0);
     console.debug("MetadataConsolidationAgent:start", { insights: state.insights.length });
 
     const consolidated = state.insights.map((insight) => ({

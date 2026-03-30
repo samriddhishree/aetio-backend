@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import cors from 'cors';
 import crypto from "crypto";
 import { handler, type GenerateInsightsArguments } from "./generate-insights/handler";
+import { runIngestionPipelineFromChunks, summarizeProject } from "./generate-insights/graph";
 import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
   deleteAllInsights,
@@ -14,7 +15,8 @@ import {
 } from "./common/services/dynamo";
 import { InsightSearchRepository } from "./common/services/repository";
 
-import type { Insight } from "./types";
+import type { Chunk, FindingRef, Insight } from "./types";
+import { config  } from "./common/services/config";
 
 type GenerateInsightsResponse = {
   status: "accepted";
@@ -172,6 +174,77 @@ const formatInsights = (items: Insight[]): FormattedInsight[] => {
   });
 };
 
+const toFindingRefMap = (items: Insight[]): Map<string, FindingRef> => {
+  const findingById = new Map<string, FindingRef>();
+  for (const item of items) {
+    const refs = toObjectRecord(item.additional_refs);
+    const findings = Array.isArray(refs.findings) ? refs.findings : [];
+    for (const finding of findings) {
+      if (!finding || typeof finding !== "object" || Array.isArray(finding)) continue;
+      const findingObj = finding as FindingRef;
+      if (typeof findingObj.finding_id !== "string" || findingObj.finding_id.trim().length === 0) {
+        continue;
+      }
+      findingById.set(findingObj.finding_id, findingObj);
+    }
+  }
+  return findingById;
+};
+
+const enrichInsightFindingRefs = (
+  insight: Insight,
+  findingById: Map<string, FindingRef>,
+): Insight => {
+  const refs = toObjectRecord(insight.additional_refs);
+  const findingIds = Array.isArray(refs.finding_ids)
+    ? refs.finding_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    : [];
+
+  if (findingIds.length === 0) {
+    return insight;
+  }
+
+  const expandedFindings: FindingRef[] = findingIds.map((findingId) => {
+    const existing = findingById.get(findingId);
+    if (existing) return existing;
+    // Fallback for older records that only persisted finding_ids.
+    return {
+      finding_id: findingId,
+      text: insight.text,
+      supporting_chunks: insight.supporting_chunks,
+      document_id: insight.document_id,
+      s3_node: insight.s3_node,
+    };
+  });
+
+  const deduped = new Map<string, FindingRef>();
+  for (const finding of expandedFindings) {
+    deduped.set(finding.finding_id, finding);
+  }
+  const { finding_ids: _findingIds, ...rest } = refs;
+
+  return {
+    ...insight,
+    additional_refs: {
+      ...rest,
+      findings: Array.from(deduped.values()),
+    },
+  };
+};
+
+const isChunk = (value: unknown): value is Chunk => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const chunk = value as Partial<Chunk>;
+  return (
+    typeof chunk.chunk_id === "string" &&
+    typeof chunk.document_id === "string" &&
+    (chunk.type === "text" || chunk.type === "image") &&
+    typeof chunk.content === "string" &&
+    Array.isArray(chunk.block_ids) &&
+    typeof chunk.s3_node === "string"
+  );
+};
+
 app.get("/insights", async (req: Request, res: Response) => {
   const parsedFilters = extractInsightFilters(req.query);
   if ("error" in parsedFilters) {
@@ -248,7 +321,9 @@ app.get("/formatted-insights", async (req: Request, res: Response) => {
   try {
     const effectiveFilters = applyJwtUserIdFilter(req, parsedFilters);
     const items = await listInsights(effectiveFilters);
-    const formattedItems = formatInsights(items);
+    const findingById = toFindingRefMap(items);
+    const enrichedItems = items.map((item) => enrichInsightFindingRefs(item, findingById));
+    const formattedItems = formatInsights(enrichedItems);
     return res.json({ count: formattedItems.length, items: formattedItems });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -341,17 +416,69 @@ app.post("/generateInsights", async (req: Request, res: Response) => {
   }
 });
 
-if (process.env.NODE_ENV !== "test") {
-  void (async () => {
-    await getAwsAssumeRoleProvider();
-    console.log(getCachedAwsAssumeRoleProvider());
-    console.log(process.env.OPENAI_API_KEY ? "OpenAI API key is set" : "OpenAI API key is NOT set");
-    console.log(process.env.UNSTRUCTURED_API_KEY ? "Unstructured API key is set" : "Unstructured API key is NOT set");
-    app.listen(port, () => {
-      console.log(`Aetio backend listening on port ${port}`);
+app.post("/generateInsightsFromChunks", async (req: Request, res: Response) => {
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const body = toObjectRecord(req.body);
+  const rawChunks = body.chunks;
+  if (!Array.isArray(rawChunks) || rawChunks.length === 0) {
+    return res.status(400).json({ error: "chunks is required and must be a non-empty array" });
+  }
+
+  if (!rawChunks.every(isChunk)) {
+    return res.status(400).json({
+      error:
+        "Each chunk must include chunk_id, document_id, type, content, block_ids, and s3_node.",
     });
-  })();
-}
+  }
+
+  const chunks = rawChunks as Chunk[];
+  const contextUrls = Array.isArray(body.contextUrls)
+    ? body.contextUrls.filter((url): url is string => typeof url === "string")
+    : [];
+  const researchContext =
+    typeof body.researchContext === "string" ? body.researchContext : "";
+  const userInfo = toObjectRecord(body.userInfo ?? body.user_info) as {
+    full_name?: string;
+    email_address?: string;
+  };
+  const requestId = req.header("x-request-id") ?? crypto.randomUUID();
+
+  try {
+    const summaryResult = await summarizeProject(contextUrls, researchContext, {
+      userId: jwtUserId,
+      userInfo,
+    });
+    const result = await runIngestionPipelineFromChunks(
+      chunks,
+      jwtUserId,
+      userInfo,
+      summaryResult.insight_id,
+    );
+
+    return res.status(202).json({
+      status: "accepted",
+      requestId,
+      ok: result.errors.length === 0,
+      insights: result.insights.length,
+      documents: result.documents.length,
+      chunks: result.chunks.length,
+      summary: summaryResult.summary,
+      errors: result.errors.map((error) => ({
+        stage: error.stage,
+        message: error.message,
+        url: error.url,
+        document_id: error.document_id,
+      })),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message, requestId });
+  }
+});
 
 export { app };
 
@@ -400,3 +527,24 @@ const decodeJwtPayload = (token: string): Record<string, unknown> | undefined =>
     return undefined;
   }
 };
+
+if (process.env.NODE_ENV !== "test") {
+  void (async () => {
+    await getAwsAssumeRoleProvider();
+    console.log(getCachedAwsAssumeRoleProvider());
+    console.log(
+      process.env.OPENAI_API_KEY
+        ? "OpenAI API key is set"
+        : "OpenAI API key is NOT set",
+    );
+    console.log(
+      process.env.UNSTRUCTURED_API_KEY
+        ? "Unstructured API key is set"
+        : "Unstructured API key is NOT set",
+    );
+    console.log(`Documents bucket: ${config.documentsBucket}`);
+    app.listen(port, () => {
+      console.log(`Aetio backend listening on port ${port}`);
+    });
+  })();
+}

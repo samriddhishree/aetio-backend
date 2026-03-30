@@ -8,6 +8,9 @@ const makeState = (): GraphState => ({
   imageBlocks: [],
   documents: [],
   chunks: [],
+  findings: [],
+  finding_batches: [],
+  batch_insights: [],
   imageChunks: [],
   insights: [],
   sourceTextByS3Node: {},
@@ -15,7 +18,7 @@ const makeState = (): GraphState => ({
 });
 
 describe("insightExtractionAgent", () => {
-  it("extracts insights from chunk content", async () => {
+  it("extracts insights from finding batches", async () => {
     const mockCreate = vi.fn().mockResolvedValue({
       choices: [
         {
@@ -38,12 +41,39 @@ describe("insightExtractionAgent", () => {
 
     const state: GraphState = {
       ...makeState(),
+      findings: [
+        {
+          finding_id: "f1",
+          text: "Revenue increased 18% YoY",
+          evidence_snipped: "Revenue increased 18% YoY in enterprise accounts.",
+          evidence_type: "quantitative",
+          supporting_chunks: [{ chunk_id: "c1" }],
+          document_id: "d1",
+          s3_node: "source:s3://bucket/doc#chunk:0",
+        },
+      ],
+      finding_batches: [
+        {
+          batch_id: "batch-1",
+          findings: [
+            {
+              finding_id: "f1",
+              text: "Revenue increased 18% YoY",
+              evidence_snipped: "Revenue increased 18% YoY in enterprise accounts.",
+              evidence_type: "quantitative",
+              supporting_chunks: [{ chunk_id: "c1" }],
+              document_id: "d1",
+              s3_node: "source:s3://bucket/doc#chunk:0",
+            },
+          ],
+        },
+      ],
       chunks: [
         {
           chunk_id: "c1",
           document_id: "d1",
           type: "text",
-          content: "Some content",
+          content: "Revenue increased 18% YoY in enterprise accounts.",
           block_ids: ["b1"],
           s3_node: "source:s3://bucket/doc#chunk:0",
         },
@@ -58,7 +88,7 @@ describe("insightExtractionAgent", () => {
     openaiSpy.mockRestore();
   });
 
-  it("skips empty chunk content", async () => {
+  it("returns empty insights when there are no findings", async () => {
     const openaiSpy = vi.spyOn(openaiModule, "openai", "get").mockReturnValue({
       chat: {
         completions: { create: vi.fn() },
@@ -67,16 +97,6 @@ describe("insightExtractionAgent", () => {
 
     const state: GraphState = {
       ...makeState(),
-      chunks: [
-        {
-          chunk_id: "c1",
-          document_id: "d1",
-          type: "text",
-          content: "",
-          block_ids: ["b1"],
-          s3_node: "source:s3://bucket/doc#chunk:0",
-        },
-      ],
     };
 
     const result = await insightExtractionAgent(state);

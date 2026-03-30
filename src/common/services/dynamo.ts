@@ -15,7 +15,11 @@ import { chunkArray, sleep } from "./utils";
 const client = new DynamoDBClient({
   credentials: getCachedAwsAssumeRoleProvider(),
 });
-const docClient = DynamoDBDocumentClient.from(client);
+const docClient = DynamoDBDocumentClient.from(client, {
+  marshallOptions: {
+    removeUndefinedValues: true,
+  },
+});
 
 const MAX_BATCH = 25;
 const MAX_RETRIES = 5;

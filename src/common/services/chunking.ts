@@ -41,18 +41,16 @@ export function chunkDocument(
     const content = current.join(" ").trim();
     const chunkIndex = chunks.length;
     const chunkId = hashId(`${document.document_id}:${chunkIndex}`);
-    const s3Node = `source:${document.url}#chunk:${chunkIndex}`;
     const chunk: Chunk = {
       chunk_id: chunkId,
       document_id: document.document_id,
       type: "text",
       content,
       block_ids: [`text:${chunkIndex}`],
-      s3_node: s3Node,
+      s3_node: "",
       source_url: document.url,
     };
     chunks.push(chunk);
-    sourceTextByS3Node[s3Node] = content;
     current = [];
     currentTokens = 0;
   };
