@@ -397,8 +397,11 @@ Input:
 
 ```json
 {
-  "userId": "user-123",
   "userInfo": {
+    "full_name": "Jane Doe",
+    "email_address": "jane@example.com"
+  },
+  "user_info": {
     "full_name": "Jane Doe",
     "email_address": "jane@example.com"
   },
@@ -413,10 +416,14 @@ Input:
 ```
 
 - Required fields:
-  - `userId`
   - `outputUrls` (non-empty array)
+- Required header:
+  - `Authorization: Bearer <jwt>` (JWT `sub` is used as `userId`)
 - Optional header:
   - `x-request-id` (if absent, server generates UUID)
+- Notes:
+  - Request `userId` in body is ignored/overwritten by JWT `sub`.
+  - Both `userInfo` and `user_info` are accepted.
 
 Output:
 
@@ -444,26 +451,72 @@ System diagram:
 ```mermaid
 flowchart TD
   C[Client] --> API[Express /generateInsights]
-  API --> SUM[Summarize context]
-  SUM --> OAI1[OpenAI]
-  SUM --> DDB1[(DynamoDB persist summary insight)]
+  API --> SUM[SummarizeProject]
+  SUM --> SA[SummarizeAgent]
+  SA --> OAI1[OpenAI]
+  SUM --> DDB1[(DynamoDB persist summary root insight)]
 
-  API --> PIPE[Ingestion graph]
-  PIPE --> DL[DocumentLoader]
-  DL --> S3[(AWS S3 if s3:// URL)]
-  DL --> UST[Unstructured API for PDF parsing]
-  DL --> WEB[HTTP fetch for non-S3 URLs]
+  API --> G[buildIngestionGraph]
+  G --> DL[DocumentLoader]
+  DL --> S3[(AWS S3 fetch for s3:// URLs)]
+  DL --> UST[Unstructured API parsing]
+  DL --> WEB[HTTP fetch for web URLs]
 
-  PIPE --> IE[Insight/Critique/Revise/Validate/Hierarchy agents]
-  IE --> OAI2[OpenAI]
+  DL --> CH[ChunkingNode]
+  CH --> FE[FindingExtractionAgent]
+  FE --> OAI2[OpenAI]
+  FE --> FB[FindingBatchingAgent]
+  FB --> IE[InsightExtractionAgent]
+  IE --> OAI3[OpenAI]
+  IE --> CBM[CrossBatchMergeAgent]
+  CBM --> CR[CritiqueAgent]
+  CR --> DC[DeterministicCritiqueAgent]
+  CR --> SC[SemanticCritiqueAgent]
+  SC --> OAI4[OpenAI]
+  CR --> RV[ReviseAgent]
+  RV --> SRP[SemanticRevisionPlanner]
+  SRP --> OAI5[OpenAI]
+  RV --> RA[RevisionApplier]
+  RV --> VA[ValidateAgent]
+  VA --> MC[MetadataConsolidationAgent]
+  MC --> HF[HierarchyFinalizeAgent (deterministic)]
+  HF --> PERSIST[PersistenceNode]
+  PERSIST --> DDB2[(DynamoDB persist finalized insights)]
 
-  PIPE --> PERSIST[PersistenceNode]
-  PERSIST --> DDB2[(DynamoDB persist insights)]
-
-  DDB1 --> API
   DDB2 --> API
   API --> C
 ```
+
+### Generate-insights agents and nodes
+
+| Node / Agent | What it does | Why it is needed |
+|---|---|---|
+| `SummarizeProject` + `SummarizeAgent` | Generates a project/context summary and persists it as a root insight before document ingestion. | Gives each run a project-level anchor (`projectId`) and shared context for downstream hierarchy attachment. |
+| `DocumentLoader` | Loads source content from S3/HTTP and parses documents (including PDF parsing flow). | Normalizes heterogeneous sources into a consistent document payload. |
+| `ChunkingNode` | Splits loaded documents into structured chunks. | Creates manageable evidence units for extraction and traceability. |
+| `FindingExtractionAgent` | Uses LLM extraction over chunks to produce concrete findings with evidence references. | Establishes a grounded evidence layer before higher-level insight synthesis. |
+| `FindingBatchingAgent` | Groups findings into bounded batches. | Controls token/latency/cost and improves extraction stability for insight generation. |
+| `InsightExtractionAgent` | Produces insights (and local parent-child links) from finding batches. | Converts raw findings into reusable insight objects with supporting evidence. |
+| `CrossBatchMergeAgent` | Deterministically deduplicates/merges near-duplicate insights across batches and remaps parent refs. | Prevents fragmented duplicate insights caused by batch boundaries. |
+| `CritiqueAgent` | Orchestrates critique pass by combining deterministic and semantic critique signals. | Central quality gate before revision. |
+| `DeterministicCritiqueAgent` | Applies rule-based checks (missing support, hierarchy issues, metadata issues). | Fast, predictable validation for objective defects. |
+| `SemanticCritiqueAgent` | Uses LLM critique for nuanced semantic weaknesses not captured by rules. | Catches subtle quality issues that require language understanding. |
+| `ReviseAgent` | Orchestrates revision planning + deterministic application of revisions. | Converts critique into actionable changes while preserving control. |
+| `SemanticRevisionPlanner` | Uses LLM to propose structured revision actions. | Produces targeted fixes for semantic issues in a machine-readable plan. |
+| `RevisionApplier` | Deterministically applies revision actions, resolves merges/removals, and enforces hierarchy integrity. | Ensures revision execution is safe, reproducible, and schema-consistent. |
+| `ValidateAgent` | Final validation pass for support, metadata normalization, and parent-reference sanity. | Filters/normalizes remaining invalid insights before persistence. |
+| `MetadataConsolidationAgent` | Consolidates/deduplicates metadata entries per insight. | Produces stable metadata shape for querying and downstream usage. |
+| `HierarchyFinalizeAgent` | Deterministic hierarchy cleanup only: remove dangling/self/cyclic parent links and normalize roots. No LLM calls. | Final structural integrity pass immediately before persistence. |
+| `PersistenceNode` | Persists finalized insights to DynamoDB. | Commits pipeline output as the system of record. |
+
+---
+## Pending TODOs
+
+- `src/common/services/dynamo.ts`: TODO get rid of `Scan` usage.
+- `src/generate-insights/handler.ts`: TODO persist `summary.additional_refs.pendingInsightsNum`.
+- `src/generate-insights/agents/semanticRevisionPlanner.ts`: TODO reassess deletion policy; `remove` actions are currently downgraded and retained.
+- `src/generate-insights/agents/revisionApplier.ts`: TODO reassess deletion policy; suspected hallucinations are currently retained with lowered confidence.
+- `src/index.ts`: TODO marker for existing ref-handling cleanup.
 
 ---
 
@@ -471,10 +524,10 @@ flowchart TD
 
 ```bash
 curl -X POST http://localhost:8000/generateInsights \
+  -H "authorization: Bearer <jwt-with-sub>" \
   -H "content-type: application/json" \
   -H "x-request-id: local" \
   -d '{
-    "userId": "user-123",
     "outputUrls": ["https://example.com/report.pdf"],
     "contextUrls": ["https://example.com/overview.pdf"],
     "researchContext": "Optional project summary"
