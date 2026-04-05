@@ -1,0 +1,85 @@
+import { Annotation } from "@langchain/langgraph";
+import type {
+  Finding,
+  GenerateInsightsV2State,
+  InsightFamily,
+  InsightFamilyData,
+  NormalizedResearchContext,
+  InsightInstanceRow,
+  V2Chunk,
+  V2DocumentDescriptor,
+  V2ExtractedDocument,
+  V2NormalizedDocument,
+  V2Table,
+} from "./types";
+import type { PipelineError } from "../types";
+
+const mergeArray = <T>(left: T[], right: T[]) => left.concat(right);
+const overwrite = <T>(left: T, right: T) => right ?? left;
+
+export const GenerateInsightsV2StateAnnotation = Annotation.Root({
+  sourceUris: Annotation<string[]>({ value: mergeArray, default: () => [] }),
+  contextUrls: Annotation<string[] | undefined>({ value: overwrite, default: () => undefined }),
+  researchContext: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  normalizedResearchContext: Annotation<NormalizedResearchContext | undefined>({
+    value: overwrite,
+    default: () => undefined,
+  }),
+  userId: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  projectId: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  organizationId: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  status: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  documents: Annotation<V2DocumentDescriptor[]>({ value: overwrite, default: () => [] }),
+  extractedDocuments: Annotation<V2ExtractedDocument[]>({ value: overwrite, default: () => [] }),
+  normalizedDocuments: Annotation<V2NormalizedDocument[]>({ value: overwrite, default: () => [] }),
+  chunks: Annotation<V2Chunk[]>({ value: overwrite, default: () => [] }),
+  tables: Annotation<V2Table[]>({ value: overwrite, default: () => [] }),
+  findings: Annotation<Finding[]>({ value: overwrite, default: () => [] }),
+  validatedFindings: Annotation<Finding[]>({ value: overwrite, default: () => [] }),
+  metadataFilters: Annotation<string[]>({ value: overwrite, default: () => [] }),
+  insightFamilies: Annotation<InsightFamily[]>({ value: overwrite, default: () => [] }),
+  insightRows: Annotation<InsightInstanceRow[]>({ value: overwrite, default: () => [] }),
+  insightFamilyData: Annotation<InsightFamilyData[]>({ value: overwrite, default: () => [] }),
+  persistedFamilyCounts: Annotation<
+    { created: number; updated: number; deleted: number } | undefined
+  >({ value: overwrite, default: () => undefined }),
+  persistedInsightFamilyDataCounts: Annotation<
+    { created: number; updated: number; deleted: number } | undefined
+  >({ value: overwrite, default: () => undefined }),
+  errors: Annotation<PipelineError[]>({ value: mergeArray, default: () => [] }),
+});
+
+export const emptyGenerateInsightsV2State = (
+  input: {
+    sourceUris: string[];
+    contextUrls?: string[];
+    researchContext?: string;
+    userId?: string;
+    projectId?: string;
+    organizationId?: string;
+    status?: string;
+  },
+): GenerateInsightsV2State => ({
+  sourceUris: input.sourceUris,
+  contextUrls: input.contextUrls,
+  researchContext: input.researchContext,
+  normalizedResearchContext: undefined,
+  userId: input.userId,
+  projectId: input.projectId,
+  organizationId: input.organizationId,
+  status: input.status,
+  documents: [],
+  extractedDocuments: [],
+  normalizedDocuments: [],
+  chunks: [],
+  tables: [],
+  findings: [],
+  validatedFindings: [],
+  metadataFilters: [],
+  insightFamilies: [],
+  insightRows: [],
+  insightFamilyData: [],
+  persistedFamilyCounts: undefined,
+  persistedInsightFamilyDataCounts: undefined,
+  errors: [],
+});

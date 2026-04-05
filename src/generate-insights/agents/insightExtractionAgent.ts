@@ -1,9 +1,5 @@
 import type {
-  BatchInsightResult,
   Chunk,
-  Finding,
-  FindingBatch,
-  FindingRef,
   GraphState,
   Insight,
   PipelineError,
@@ -16,79 +12,57 @@ import { chunkArray, hashId, mapWithConcurrency } from "../../common/services/ut
 const INSIGHT_EXTRACTION_PROMPT = `
 You are an Insight Extraction Agent.
 
-Your job is to transform a set of extracted findings into a structured set of insights.
-
-Important:
-- The findings are already the evidence-bearing units.
-- Do NOT behave like a document summarizer.
-- Do NOT generate vague high-level summaries unless they are directly supported by multiple findings.
-- Your role is to organize, refine, deduplicate, and compose findings into a coherent insight set.
-- Write each insight as the underlying claim or finding itself, not as a description of what a source, citation, study, chunk, or document says.
+Your job is to extract a structured set of insights directly from document chunks and contextual snippets.
 
 Primary goal:
-Produce a set of evidence-backed insights that preserve the important informational value of the findings and organize them into parent/child relationships where appropriate.
+Extract evidence-backed insights that are directly relevant to the main thesis, analytical purpose, or substantive point of the document.
 
-Inputs:
-You will receive extracted findings. Each finding may be quantitative, qualitative, or mixed.
+Important:
+- Do NOT behave like a generic document summarizer.
+- Do NOT extract every factual statement.
+- Extract only the findings, claims, comparisons, conclusions, or observations that materially contribute to the document's main point.
+- Write each insight as the underlying claim or finding itself, not as a description of what a source, citation, chunk, study, or document says.
 
-Each finding is already grounded in document evidence and may include:
-- finding text
-- evidence_snipped
-- supporting_chunks
-- evidence_type
-- optional structured attributes such as metric, value, comparison, segment, region, or timeframe
+Relevance requirement:
+- First infer the likely purpose of the document from the provided chunk content.
+- Then prioritize insights that directly support, explain, compare, or materially contribute to that purpose.
+- Deprioritize or omit:
+  - author disclosures
+  - conflict of interest statements
+  - acknowledgments
+  - funding statements
+  - copyright notices
+  - citation metadata
+  - references to the existence of sources rather than their substantive content
+  - boilerplate administrative text
 
-Instructions:
+Grounding requirement:
+- Every insight must be directly supported by the provided text.
+- Every insight must include:
+  - insight text
+  - evidence_snippet
+  - supporting_chunks
+  - metadata entries supported by evidence
+- The evidence_snippet must be a concise textual excerpt or close paraphrase of the specific text grounding the insight.
+- Do not invent evidence.
 
-1. Treat findings as the primary source material.
-   - Build insights from findings.
-   - Do not ignore the findings and re-summarize the document from scratch.
-
-2. Preserve evidence fidelity.
-   - If a finding contains important numeric, comparative, segmented, or time-based information, preserve that information in the resulting insight text.
-   - Do NOT paraphrase away important numbers, percentages, deltas, rankings, comparisons, or segment-specific differences.
-
-3. Prefer evidence-rich insights over vague summaries.
-   - Bad: "Performance was mixed across segments."
-   - Better: "Enterprise revenue increased 18% YoY while SMB revenue declined 6% YoY."
-   - Bad: "Retention worsened in some regions."
-   - Better: "APAC churn increased by 3 percentage points while North America churn remained flat."
-
-4. Promote atomic findings into leaf insights when appropriate.
-   - Findings that contain concrete evidence should often become leaf/sub-insights.
-   - Parent insights may group multiple closely related findings when a shared pattern is clearly supported.
-
-5. Only create parent insights when justified.
-   - Parent insights should represent a real common pattern across multiple findings.
-   - Parent insights must remain specific and evidence-backed.
-   - Do NOT create generic themes like "Market Trends", "Performance Overview", or "Business Challenges" unless those phrases are truly supported and precise.
-
-6. Deduplicate and normalize where useful.
-   - If multiple findings express the same underlying fact, merge them into the strongest, clearest insight.
-   - Preserve the best evidence and supporting chunks.
-
-7. Parent-child guidance:
-   - Child insights should usually be the more concrete or specific findings.
-   - Parent insights should usually be a slightly more general statement supported by those children.
-   - Do not force hierarchy if the findings do not naturally group.
-
-8. Support all document types.
-   - For quantitative/data-driven findings: preserve metrics, values, changes, comparisons, and scope.
-   - For qualitative findings: preserve claims, arguments, observations, and conclusions.
-   - For mixed findings: preserve both the factual claim and its evidentiary detail.
-
-9. Every insight must include:
-   - text
-   - supporting_chunks
-   - optional sub_insights
-   - metadata entries supported by evidence
+Writing rules:
+1. Express the substantive finding or claim directly.
+2. Do NOT write:
+   - "The document states..."
+   - "The supporting chunk includes..."
+   - "A study found..."
+   - "The paper titled..."
+3. Preserve important numbers, percentages, deltas, rankings, comparisons, trends, and directional changes when material.
+4. Preserve important qualifiers such as region, segment, cohort, timeframe, product, or condition when material.
+5. Prefer evidence-rich, specific insights over vague summaries.
+6. If no substantive insight is present in a chunk/context, do not invent one.
 
 Metadata guidelines:
-- Metadata represents categorical descriptors that may apply across many insights.
+- Metadata should be broadly reusable across insights.
 - Examples include: topic, region, industry, product, market_segment, company, technology, policy_area, timeframe.
 - Do NOT limit yourself only to these examples.
-- Only generate metadata fields that are broadly reusable across insights.
-- Avoid overly specific or one-off metadata fields.
+- Avoid overly specific or one-off metadata.
 - If metadata is weakly supported, omit it.
 
 Metadata format:
@@ -100,17 +74,10 @@ Metadata format:
 
 Additional rules:
 - Each insight must have at least one supporting chunk.
-- Metadata should describe the insight, not simply restate the text.
+- Metadata should describe the insight, not restate it.
 - Most strong insights should include 1–3 metadata entries when clearly supported.
-- Preserve comparisons, directionality, scope, and important qualifiers when they are material.
-- Prefer a smaller number of high-quality insights to a large number of weak or redundant ones.
-- If a parent insight would become too vague, do not create it.
-- If findings are best left as standalone insights, keep them standalone.
-
-Desired behavior:
-- Leaf insights should often correspond closely to atomic findings.
-- Parent insights should organize and synthesize related findings without losing specificity.
-- The final insight set should be useful for downstream critique, revision, validation, hierarchy building, metadata consolidation, search, and AI-assisted exploration.
+- Prefer fewer strong insights over many weak or redundant ones.
+- If a candidate insight is mostly boilerplate or peripheral to the document's point, discard it.
 
 Return ONLY valid JSON matching the schema.
 `;
@@ -126,7 +93,7 @@ const INSIGHT_SCHEMA = {
         additionalProperties: false,
         properties: {
           text: { type: "string" },
-
+          evidence_snippet: { type: "string" },
           supporting_chunks: {
             type: "array",
             items: {
@@ -140,7 +107,6 @@ const INSIGHT_SCHEMA = {
               required: ["chunk_id", "paragraph_index", "line_index"],
             },
           },
-
           metadata: {
             type: "array",
             items: {
@@ -154,7 +120,6 @@ const INSIGHT_SCHEMA = {
               required: ["tag", "value", "confidence"],
             },
           },
-
           sub_insights: {
             type: "array",
             items: {
@@ -162,7 +127,7 @@ const INSIGHT_SCHEMA = {
               additionalProperties: false,
               properties: {
                 text: { type: "string" },
-
+                evidence_snippet: { type: "string" },
                 supporting_chunks: {
                   type: "array",
                   items: {
@@ -176,7 +141,6 @@ const INSIGHT_SCHEMA = {
                     required: ["chunk_id", "paragraph_index", "line_index"],
                   },
                 },
-
                 metadata: {
                   type: "array",
                   items: {
@@ -191,11 +155,11 @@ const INSIGHT_SCHEMA = {
                   },
                 },
               },
-              required: ["text", "supporting_chunks", "metadata"],
+              required: ["text", "evidence_snippet", "supporting_chunks", "metadata"],
             },
           },
         },
-        required: ["text", "sub_insights", "supporting_chunks", "metadata"],
+        required: ["text", "evidence_snippet", "supporting_chunks", "metadata"],
       },
     },
   },
@@ -205,6 +169,7 @@ const INSIGHT_SCHEMA = {
 type InsightResponse = {
   insights: Array<{
     text: string;
+    evidence_snippet: string;
     supporting_chunks?: Array<{
       chunk_id: string;
       paragraph_index?: number | null;
@@ -217,6 +182,7 @@ type InsightResponse = {
     }>;
     sub_insights?: Array<{
       text: string;
+      evidence_snippet: string;
       supporting_chunks?: Array<{
         chunk_id: string;
         paragraph_index?: number | null;
@@ -231,45 +197,86 @@ type InsightResponse = {
   }>;
 };
 
-const MAX_FINDINGS_PER_FALLBACK_BATCH = 12;
-const MAX_CHUNK_CONTEXT_CHARS = 700;
+type ChunkBatch = {
+  batch_id: string;
+  document_id: string;
+  chunks: Chunk[];
+};
 
-function normalizeForMatch(text: string): string {
-  return text.trim().replace(/\s+/g, " ").toLowerCase();
+const MAX_CHUNK_CONTEXT_CHARS = 900;
+const MAX_EVIDENCE_SNIPPET_CHARS = 320;
+const DEFAULT_BATCH_SIZE = 8;
+const MIN_BATCH_SIZE = 4;
+const MAX_BATCH_SIZE = 16;
+
+function sanitizeBatchSize(size: number): number {
+  if (!Number.isFinite(size)) return DEFAULT_BATCH_SIZE;
+  return Math.max(MIN_BATCH_SIZE, Math.min(MAX_BATCH_SIZE, Math.floor(size)));
 }
 
-function findParagraphIndex(paragraphs: string[] | undefined, text: string): number | undefined {
-  if (!paragraphs || paragraphs.length === 0) return undefined;
-  const needle = normalizeForMatch(text);
-  if (!needle) return undefined;
-  return paragraphs.findIndex((paragraph) => normalizeForMatch(paragraph).includes(needle));
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 1).trimEnd()}...`;
 }
 
-function findLineIndex(content: string, text: string): number | undefined {
-  if (!content.includes("\n")) return undefined;
-  const needle = normalizeForMatch(text);
-  if (!needle) return undefined;
-  const lines = content.split(/\r?\n/);
-  return lines.findIndex((line) => normalizeForMatch(line).includes(needle));
+function cleanSnippet(value: string | null | undefined): string | undefined {
+  const compact = value?.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return truncate(compact, MAX_EVIDENCE_SNIPPET_CHARS);
 }
 
-function buildSupportingChunks(
-  chunk: Chunk,
-  insightText: string,
-): SupportingChunkRef[] {
-  const paragraphIndex = findParagraphIndex(chunk.paragraphs, insightText);
-  const lineIndex =
-    paragraphIndex === undefined ? findLineIndex(chunk.content, insightText) : undefined;
+function buildFallbackSupportingChunks(batch: ChunkBatch): SupportingChunkRef[] {
+  if (batch.chunks.length === 0) return [];
+  return batch.chunks.slice(0, 3).map((chunk) => ({ chunk_id: chunk.chunk_id }));
+}
 
-  const entry: SupportingChunkRef = {
-    chunk_id: chunk.chunk_id,
-    ...(paragraphIndex !== undefined && paragraphIndex >= 0
-      ? { paragraph_index: paragraphIndex }
-      : {}),
-    ...(lineIndex !== undefined && lineIndex >= 0 ? { line_index: lineIndex } : {}),
+function getChunkContext(chunk: Chunk): string {
+  const content = chunk.content?.trim() ?? "";
+  if (!content) return "";
+  if (content.length <= MAX_CHUNK_CONTEXT_CHARS) return content;
+  return truncate(content, MAX_CHUNK_CONTEXT_CHARS);
+}
+
+function buildChunkBatches(chunks: Chunk[]): ChunkBatch[] {
+  if (chunks.length === 0) return [];
+  const batchSize = sanitizeBatchSize(config.findingBatchSize);
+  const groupedByDocument = new Map<string, Chunk[]>();
+
+  // Removed finding-based batching: chunk grouping now happens inside insight extraction.
+  for (const chunk of chunks) {
+    const list = groupedByDocument.get(chunk.document_id) ?? [];
+    list.push(chunk);
+    groupedByDocument.set(chunk.document_id, list);
+  }
+
+  const batches: ChunkBatch[] = [];
+  for (const [documentId, docChunks] of groupedByDocument.entries()) {
+    const groups = chunkArray(docChunks, batchSize);
+    for (const [index, group] of groups.entries()) {
+      batches.push({
+        batch_id: hashId(`${documentId}:chunk-batch:${index}`),
+        document_id: documentId,
+        chunks: group,
+      });
+    }
+  }
+
+  return batches;
+}
+
+function buildBatchInput(batch: ChunkBatch) {
+  return {
+    batch_id: batch.batch_id,
+    document_id: batch.document_id,
+    chunks: batch.chunks.map((chunk) => ({
+      chunk_id: chunk.chunk_id,
+      type: chunk.type,
+      source_url: chunk.source_url,
+      page: chunk.page,
+      s3_node: chunk.s3_node,
+      content: getChunkContext(chunk),
+    })),
   };
-
-  return [entry];
 }
 
 function normalizeSupportingChunks(
@@ -281,6 +288,7 @@ function normalizeSupportingChunks(
       }>
     | undefined,
   fallback: SupportingChunkRef[],
+  chunkById: Map<string, Chunk>,
 ): SupportingChunkRef[] {
   const normalized = (refs ?? [])
     .filter((ref) => typeof ref.chunk_id === "string" && ref.chunk_id.trim().length > 0)
@@ -292,160 +300,112 @@ function normalizeSupportingChunks(
       ...(typeof ref.line_index === "number" && ref.line_index >= 0
         ? { line_index: ref.line_index }
         : {}),
-    }));
+    }))
+    .filter((ref) => chunkById.has(ref.chunk_id));
 
   return normalized.length > 0 ? normalized : fallback;
 }
 
-function toFindingRef(finding: Finding): FindingRef {
-  return {
-    finding_id: finding.finding_id,
-    text: finding.text,
-    evidence_snipped: finding.evidence_snipped,
-    evidence_type: finding.evidence_type,
-    supporting_chunks: finding.supporting_chunks,
-    document_id: finding.document_id,
-    s3_node: finding.s3_node,
-    metric: finding.metric,
-    value: finding.value,
-    comparison: finding.comparison,
-    segment: finding.segment,
-    timeframe: finding.timeframe,
-  };
+function normalizeMetadata(
+  metadata:
+    | Array<{
+        tag: string;
+        value: string;
+        confidence: number;
+      }>
+    | undefined,
+) {
+  return (metadata ?? [])
+    .map((entry) => ({
+      tag: entry.tag?.trim(),
+      value: entry.value?.trim(),
+      confidence:
+        typeof entry.confidence === "number" && Number.isFinite(entry.confidence)
+          ? Math.max(0, Math.min(1, entry.confidence))
+          : undefined,
+    }))
+    .filter((entry) => Boolean(entry.tag) && Boolean(entry.value))
+    .map((entry) => ({
+      tag: entry.tag as string,
+      value: entry.value as string,
+      ...(typeof entry.confidence === "number"
+        ? { confidence: entry.confidence }
+        : {}),
+    }));
 }
 
-function resolveSupportingFindings(
-  findings: Finding[],
+function deriveEvidenceSnippet(
+  provided: string | undefined,
   supportingChunks: SupportingChunkRef[],
-): FindingRef[] {
-  if (findings.length === 0) return [];
-  const supportingChunkIds = new Set(
-    supportingChunks
-      .map((ref) => ref.chunk_id?.trim())
-      .filter((chunkId): chunkId is string => Boolean(chunkId)),
-  );
+  chunkById: Map<string, Chunk>,
+  fallbackText: string,
+): string {
+  // Keep evidence_snippet explicitly grounded in either model-provided evidence,
+  // supporting chunk text, or (last resort) the insight text itself.
+  const direct = cleanSnippet(provided);
+  if (direct) return direct;
 
-  const matched = findings.filter((finding) =>
-    finding.supporting_chunks.some((ref) => supportingChunkIds.has(ref.chunk_id)),
-  );
-  const source = matched.length > 0 ? matched : findings;
-  return source.map(toFindingRef);
-}
+  for (const ref of supportingChunks) {
+    const chunk = chunkById.get(ref.chunk_id);
+    if (!chunk) continue;
 
-function fallbackFindingBatches(findings: Finding[]): FindingBatch[] {
-  if (findings.length === 0) return [];
-  const batchSize =
-    Number.isFinite(config.findingBatchSize) && config.findingBatchSize > 0
-      ? Math.floor(config.findingBatchSize)
-      : MAX_FINDINGS_PER_FALLBACK_BATCH;
-  const groupedByDocument = new Map<string, Finding[]>();
-  for (const finding of findings) {
-    const list = groupedByDocument.get(finding.document_id) ?? [];
-    list.push(finding);
-    groupedByDocument.set(finding.document_id, list);
-  }
-
-  const batches: FindingBatch[] = [];
-  for (const [documentId, docFindings] of groupedByDocument.entries()) {
-    const chunks = chunkArray(docFindings, batchSize);
-    for (const [batchIndex, findingChunk] of chunks.entries()) {
-      batches.push({
-        batch_id: hashId(`${documentId}:fallback-finding-batch:${batchIndex}`),
-        findings: findingChunk,
-      });
+    if (
+      typeof ref.paragraph_index === "number" &&
+      Array.isArray(chunk.paragraphs) &&
+      ref.paragraph_index >= 0 &&
+      ref.paragraph_index < chunk.paragraphs.length
+    ) {
+      const paragraph = cleanSnippet(chunk.paragraphs[ref.paragraph_index]);
+      if (paragraph) return paragraph;
     }
+
+    const contentSnippet = cleanSnippet(chunk.content);
+    if (contentSnippet) return contentSnippet;
   }
-  return batches;
-}
 
-function collectBatchSupportingChunks(findings: Finding[]): SupportingChunkRef[] {
-  const unique = new Map<string, SupportingChunkRef>();
-  for (const finding of findings) {
-    for (const ref of finding.supporting_chunks) {
-      const key = `${ref.chunk_id}:${ref.paragraph_index ?? ""}:${ref.line_index ?? ""}`;
-      if (unique.has(key)) continue;
-      unique.set(key, ref);
-    }
-  }
-  return Array.from(unique.values());
-}
-
-function getChunkContext(chunkById: Map<string, Chunk>, chunkId: string): string | undefined {
-  const content = chunkById.get(chunkId)?.content?.trim();
-  if (!content) return undefined;
-  if (content.length <= MAX_CHUNK_CONTEXT_CHARS) return content;
-  return `${content.slice(0, MAX_CHUNK_CONTEXT_CHARS - 1).trimEnd()}...`;
-}
-
-function buildBatchInput(batch: FindingBatch, chunkById: Map<string, Chunk>) {
-  return {
-    batch_id: batch.batch_id,
-    findings: batch.findings.map((finding) => {
-      const firstChunkId = finding.supporting_chunks[0]?.chunk_id;
-      return {
-        finding_id: finding.finding_id,
-        text: finding.text,
-        evidence_snipped: finding.evidence_snipped,
-        evidence_type: finding.evidence_type,
-        supporting_chunks: finding.supporting_chunks,
-        metric: finding.metric,
-        value: finding.value,
-        comparison: finding.comparison,
-        segment: finding.segment,
-        timeframe: finding.timeframe,
-        chunk_context: firstChunkId ? getChunkContext(chunkById, firstChunkId) : undefined,
-      };
-    }),
-  };
+  return cleanSnippet(fallbackText) ?? "No supporting evidence snippet available.";
 }
 
 function mapBatchResponseToInsights(
-  batch: FindingBatch,
+  batch: ChunkBatch,
   response: InsightResponse,
   chunkById: Map<string, Chunk>,
 ): Insight[] {
-  const findings = batch.findings;
-  if (findings.length === 0) return [];
+  if (batch.chunks.length === 0) return [];
 
-  const primaryDocumentId = findings[0].document_id;
-  const primaryS3Node = findings[0].s3_node || `finding-batch:${batch.batch_id}`;
-  const fallbackSupportingChunks = collectBatchSupportingChunks(findings);
-  const fallbackFromChunkContext =
-    fallbackSupportingChunks.length > 0
-      ? fallbackSupportingChunks
-      : findings[0].supporting_chunks.length > 0
-        ? findings[0].supporting_chunks
-        : (() => {
-            const chunkId = findings[0].supporting_chunks[0]?.chunk_id;
-            const chunk = chunkId ? chunkById.get(chunkId) : undefined;
-            return chunk ? buildSupportingChunks(chunk, findings[0].text) : [];
-          })();
-  const findingIds = findings.map((finding) => finding.finding_id);
+  const primaryS3Node = batch.chunks[0].s3_node || `chunk-batch:${batch.batch_id}`;
+  const fallbackSupportingChunks = buildFallbackSupportingChunks(batch);
 
   const insights: Insight[] = [];
   for (const item of response.insights ?? []) {
     const text = item.text?.trim();
     if (!text) continue;
 
-    const parentId = hashId(`${primaryDocumentId}:${batch.batch_id}:${text}`);
+    const parentId = hashId(`${batch.document_id}:${batch.batch_id}:${text}`);
     const supportingChunks = normalizeSupportingChunks(
       item.supporting_chunks,
-      fallbackFromChunkContext,
+      fallbackSupportingChunks,
+      chunkById,
     );
-    const supportingFindings = resolveSupportingFindings(findings, supportingChunks);
+
+    const evidenceSnippet = deriveEvidenceSnippet(
+      item.evidence_snippet,
+      supportingChunks,
+      chunkById,
+      text,
+    );
 
     insights.push({
       insight_id: parentId,
       text,
+      evidence_snippet: evidenceSnippet,
       s3_node: primaryS3Node,
-      document_id: primaryDocumentId,
+      document_id: batch.document_id,
       supporting_chunks: supportingChunks,
-      findings: supportingFindings,
-      metadata: item.metadata ?? [],
+      metadata: normalizeMetadata(item.metadata),
       additional_refs: {
-        findings: supportingFindings,
-        finding_ids: findingIds,
         source_batch_id: batch.batch_id,
+        source_chunk_ids: Array.from(new Set(supportingChunks.map((ref) => ref.chunk_id))),
       },
     });
 
@@ -456,22 +416,28 @@ function mapBatchResponseToInsights(
       const subSupportingChunks = normalizeSupportingChunks(
         sub.supporting_chunks,
         supportingChunks,
+        chunkById,
       );
-      const subSupportingFindings = resolveSupportingFindings(findings, subSupportingChunks);
+
+      const subEvidenceSnippet = deriveEvidenceSnippet(
+        sub.evidence_snippet,
+        subSupportingChunks,
+        chunkById,
+        subText,
+      );
 
       insights.push({
         insight_id: hashId(`${parentId}:${subText}`),
         parent_insight_id: parentId,
         text: subText,
+        evidence_snippet: subEvidenceSnippet,
         s3_node: primaryS3Node,
-        document_id: primaryDocumentId,
+        document_id: batch.document_id,
         supporting_chunks: subSupportingChunks,
-        findings: subSupportingFindings,
-        metadata: sub.metadata ?? [],
+        metadata: normalizeMetadata(sub.metadata),
         additional_refs: {
-          findings: subSupportingFindings,
-          finding_ids: findingIds,
           source_batch_id: batch.batch_id,
+          source_chunk_ids: Array.from(new Set(subSupportingChunks.map((ref) => ref.chunk_id))),
         },
       });
     }
@@ -485,49 +451,44 @@ export async function insightExtractionAgent(
 ): Promise<Partial<GraphState>> {
   console.log("InsightExtractionAgent:size", state.insights?.length ?? 0);
   const chunkById = new Map(state.chunks.map((chunk) => [chunk.chunk_id, chunk]));
-  const findingBatches =
-    state.finding_batches.length > 0
-      ? state.finding_batches
-      : fallbackFindingBatches(state.findings);
+  const chunkBatches = buildChunkBatches(state.chunks);
 
   console.debug("InsightExtractionAgent:start", {
-    findings: state.findings.length,
-    findingBatches: findingBatches.length,
+    chunks: state.chunks.length,
+    chunkBatches: chunkBatches.length,
   });
 
-  if (findingBatches.length === 0) {
+  if (chunkBatches.length === 0) {
     return {
-      findings: state.findings,
-      batch_insights: [],
       insights: [],
       errors: state.errors,
     };
   }
 
   const errors: PipelineError[] = [];
-  const batchResults = await mapWithConcurrency(
-    findingBatches,
+  const batchInsights = await mapWithConcurrency(
+    chunkBatches,
     Math.max(1, config.maxConcurrency),
-    async (batch): Promise<BatchInsightResult> => {
+    async (batch) => {
       try {
-        const sampleFinding = batch.findings[0];
+        const sampleChunk = batch.chunks[0];
         console.log(
           "InsightExtractionAgent:llm-input-sample",
           JSON.stringify({
             batch_id: batch.batch_id,
-            findings_in_batch: batch.findings.length,
-            sample_finding: sampleFinding
+            chunks_in_batch: batch.chunks.length,
+            sample_chunk: sampleChunk
               ? {
-                  finding_id: sampleFinding.finding_id,
-                  text: sampleFinding.text,
-                  evidence_snipped: sampleFinding.evidence_snipped,
-                  evidence_type: sampleFinding.evidence_type,
-                  supporting_chunks: sampleFinding.supporting_chunks.slice(0, 1),
+                  chunk_id: sampleChunk.chunk_id,
+                  type: sampleChunk.type,
+                  content_preview: getChunkContext(sampleChunk).slice(0, 220),
                 }
               : undefined,
           }),
         );
+
         const response = await openai.chat.completions.create({
+          // Reuses existing OpenAI client + strict JSON-schema parsing pattern.
           model: OPENAI_MODEL,
           temperature: 0.2,
           messages: [
@@ -538,10 +499,10 @@ export async function insightExtractionAgent(
             {
               role: "user",
               content: [
-                "Build insights from this bounded finding batch.",
-                "Treat findings as primary evidence and preserve quantitative detail.",
+                "Extract grounded insights from this bounded chunk group.",
+                "Infer document purpose from the chunk context and keep only materially relevant insights.",
                 `Batch id: ${batch.batch_id}`,
-                `Batch findings JSON:\n${JSON.stringify(buildBatchInput(batch, chunkById), null, 2)}`,
+                `Chunk group JSON:\n${JSON.stringify(buildBatchInput(batch), null, 2)}`,
               ].join("\n\n"),
             },
           ],
@@ -576,43 +537,27 @@ export async function insightExtractionAgent(
           throw error;
         }
 
-        const mappedInsights = mapBatchResponseToInsights(batch, parsed, chunkById);
-        console.log(
-          "InsightExtractionAgent:insights-with-findings-json",
-          JSON.stringify({
-            batch_id: batch.batch_id,
-            insights: mappedInsights,
-          }),
-        );
-
-        return {
-          batch_id: batch.batch_id,
-          insights: mappedInsights,
-        };
+        return mapBatchResponseToInsights(batch, parsed, chunkById);
       } catch (error) {
         errors.push({
           stage: "InsightExtractionAgent",
           message: error instanceof Error ? error.message : "Unknown error",
-          document_id: batch.findings[0]?.document_id,
+          document_id: batch.document_id,
           cause: error,
         });
-        return { batch_id: batch.batch_id, insights: [] };
+        return [];
       }
     },
   );
 
-  // Keep backward compatibility by returning flattened insights in addition to
-  // per-batch outputs. CrossBatchMergeAgent consumes batch_insights in the new flow.
-  const flattenedInsights = batchResults.flatMap((result) => result.insights);
+  const flattenedInsights = batchInsights.flat();
   console.debug("InsightExtractionAgent:end", {
-    batchInsights: batchResults.length,
+    batchInsights: batchInsights.length,
     insights: flattenedInsights.length,
     errors: errors.length,
   });
 
   return {
-    findings: state.findings,
-    batch_insights: batchResults,
     insights: flattenedInsights,
     errors: state.errors.concat(errors),
   };

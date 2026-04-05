@@ -41,13 +41,14 @@ Public endpoints:
 
 - `GET /health`
 - `GET /insights`
-- `GET /insight/:insightId`
-- `GET /insight/tree/:insightId`
 - `GET /formatted-insights`
 - `DELETE /insights/deleteAll`
 - `DELETE /project/:projectId`
 - `PATCH /insights/accept/:projectId`
 - `POST /generateInsights`
+- `POST /generate-insights-v2`
+
+Note: Insight detail endpoints (`GET /insight/:insightId`, `GET /insight/tree/:insightId`) are served by `aetio-search`.
 
 ---
 
@@ -129,80 +130,6 @@ flowchart LR
   DDB --> API
   API --> C
 ```
-
----
-
-## `GET /insight/:insightId`
-
-Description: Fetches one insight by `insight_id`.
-
-Input:
-
-- Path params:
-  - `insightId` (required)
-- Query params: none
-- Body: none
-
-Output:
-
-- `200 application/json` Insight object
-- `404` if not found
-- `400` if `insightId` missing
-- `500` on internal errors
-
-System diagram:
-
-```mermaid
-flowchart LR
-  C[Client] --> API[Express /insight/:insightId]
-  API --> DDB[(DynamoDB Query via GSI_insight_id)]
-  DDB --> API
-  API --> C
-```
-
----
-
-## `GET /insight/tree/:insightId`
-
-Description: Returns the target insight plus nearby hierarchy context.
-
-Input:
-
-- Path params:
-  - `insightId` (required)
-- Query params: none
-- Body: none
-
-Output:
-
-- `200 application/json`
-
-```json
-{
-  "insight": [ { "insight_id": "..." } ],
-  "children": [ { "insight_id": "...", "parent_insight_id": "..." } ],
-  "parents": [ { "insight_id": "..." } ],
-  "siblings": [ { "insight_id": "...", "parent_insight_id": "..." } ]
-}
-```
-
-- `404` if root insight not found
-- `400` if `insightId` missing
-- `500` on internal errors
-
-System diagram:
-
-```mermaid
-flowchart LR
-  C[Client] --> API[Express /insight/tree/:insightId]
-  API --> Repo[InsightSearchRepository]
-  Repo --> DDB[(DynamoDB GSIs / fallback scan)]
-  DDB --> Repo
-  Repo --> API
-  API --> C
-```
-
----
 
 ## `GET /formatted-insights`
 
@@ -508,6 +435,117 @@ flowchart TD
 | `MetadataConsolidationAgent` | Consolidates/deduplicates metadata entries per insight. | Produces stable metadata shape for querying and downstream usage. |
 | `HierarchyFinalizeAgent` | Deterministic hierarchy cleanup only: remove dangling/self/cyclic parent links and normalize roots. No LLM calls. | Final structural integrity pass immediately before persistence. |
 | `PersistenceNode` | Persists finalized insights to DynamoDB. | Commits pipeline output as the system of record. |
+
+---
+## `POST /generate-insights-v2`
+
+Description: Runs the v2 findings-first pipeline for mixed-source documents (PDF, report-style docs with tables, XLSX/CSV-like tabular data) and returns evidence-grounded structured output.
+
+Input:
+
+- Body:
+
+```json
+{
+  "sourceUris": [
+    "s3://bucket/scholarly-article-with-table.pdf",
+    "s3://bucket/segmented-metrics.xlsx",
+    "s3://bucket/third-party-report.pdf"
+  ],
+  "projectId": "optional-project-id",
+  "organizationId": "optional-org-id",
+  "status": "optional-status"
+}
+```
+
+- `outputUrls` is accepted as an alias for `sourceUris`.
+- Required header:
+  - `Authorization: Bearer <jwt>` (JWT `sub` is used as `userId`)
+- Optional header:
+  - `x-request-id` (if absent, server generates UUID)
+
+Output:
+
+- `200 application/json`
+
+```json
+{
+  "documents": [{ "document_id": "...", "source_uri": "s3://...", "file_type": "pdf" }],
+  "findings": [],
+  "insight_families": [
+    {
+      "family_id": "...",
+      "family_text": "Conversion performance differs across marketing channels and age groups",
+      "question_answered": "How does conversion performance vary across channels and demographic segments?",
+      "filters": ["channel", "age_group"],
+      "summary": "Optional family summary",
+      "supporting_finding_ids": ["..."]
+    }
+  ],
+  "insight_rows": []
+}
+```
+
+- `400` if `sourceUris`/`outputUrls` is missing or empty
+- `401` if JWT bearer token is missing/invalid
+- `500` on internal errors
+
+### generate-insights-v2 workflow nodes and responsibilities
+
+| Node | Responsibility | Key Output |
+|---|---|---|
+| `DocumentIntake` | Normalizes input URIs into canonical document descriptors and detects file type for routing. | `documents[]` with `document_id`, `source_uri`, `file_type` |
+| `ContentExtraction` | Fetches source files and parses via Unstructured API, preserving element-level provenance (page/section/type/sheet metadata when available). | `extractedDocuments[]` |
+| `Normalization` | Converts extracted elements into first-class text chunks and table objects. | `chunks[]`, `tables[]`, `normalizedDocuments[]` |
+| `FindingExtraction` | Produces atomic, evidence-grounded findings from chunk/table evidence units, preserving quantitative details and dimensions. | `findings[]` |
+| `FindingCritique` | Applies deterministic + semantic validation to remove unsupported, duplicate, vague, or inconsistent findings. | `validatedFindings[]` |
+| `FilterExtraction` | Derives reusable metadata dimension tags across validated findings (e.g., `age_group`, `geography`, `time_period`). | `metadataFilters[]` |
+| `FamilyGrouping` | Groups related findings into insight families and generates searchable family description fields (`family_text`, `question_answered`) backed by supporting finding IDs. | `insightFamilies[]` |
+| `InstanceTableBuilder` | Builds family instance rows from grouped findings using family filters and finding-level dimensions. | `insightRows[]` |
+| `FinalValidation` | Enforces grounding and quality consistency: families must map to findings, `family_text`/`question_answered` must be non-trivial, filters must be grounded, rows must carry evidence refs. | filtered `insightFamilies[]`, `insightRows[]` |
+| `PersistSearchableFamilies` | Persists only search-relevant family-level records to DynamoDB and synchronizes OpenSearch using explicit CRUD sync (create/index, update/upsert, delete/delete). | persisted/indexed searchable family layer |
+
+### Persistence and indexing boundary
+
+- Persisted in primary DB (`Insight` records for family layer):
+  - `insight_id` (family id)
+  - `family_text` / `text`
+  - `question_answered`
+  - `summary`
+  - `filters`
+  - family-level `metadata`
+  - `project_id`, `user_id`, `organization_id` (when provided)
+  - `document_id` + `document_ids`
+  - `source_types`
+  - `status`, timestamps
+- Indexed in OpenSearch (compact search projection):
+  - `insight_id`, `family_text`, `question_answered`, `summary`
+  - `filters`, `metadata`
+  - `project_id`, `user_id`, `organization_id`
+  - `document_ids`, `source_types`, `status`, timestamps
+  - derived `searchable_text`
+- Intentionally NOT persisted/indexed as primary semantic records:
+  - raw extracted tables/cells
+  - full row-level extraction payloads
+  - transient normalization/intermediate workflow artifacts
+
+System diagram:
+
+```mermaid
+flowchart LR
+  C[Client] --> API[Express /generate-insights-v2]
+  API --> DI[DocumentIntake]
+  DI --> CE[ContentExtraction]
+  CE --> N[Normalization]
+  N --> FE[FindingExtraction]
+  FE --> FC[FindingCritique]
+  FC --> MF[FilterExtraction]
+  MF --> FG[FamilyGrouping]
+  FG --> IT[InstanceTableBuilder]
+  IT --> FV[FinalValidation]
+  FV --> API
+  API --> C
+```
 
 ---
 ## Pending TODOs

@@ -27,15 +27,27 @@ export type SupportingChunkRef = {
   line_index?: number;
 };
 
-export type FindingEvidenceType = "quantitative" | "qualitative" | "mixed";
-
 export type Insight = {
   insight_id: string;
+  object_type?: string;
   parent_insight_id?: string | null;
   project_id?: string;
+  organization_id?: string;
   createdAt?: string;
   updatedAt?: string;
   text: string;
+  family_text?: string;
+  question_answered?: string;
+  summary?: string;
+  filters?: string[];
+  has_grid?: boolean;
+  insight_family_data_id?: string;
+  row_count?: number;
+  table_dimensions?: string[];
+  metric_columns?: string[];
+  document_ids?: string[];
+  source_types?: string[];
+  evidence_snippet: string;
   supporting_chunks?: SupportingChunkRef[];
   findings?: FindingRef[];
   metadata?: InsightMetadataEntry[];
@@ -104,31 +116,6 @@ export type ImageChunk = {
   block_ids: string[];
 };
 
-export type Finding = {
-  finding_id: string;
-  text: string;
-  evidence_snipped: string;
-  evidence_type: FindingEvidenceType;
-  supporting_chunks: SupportingChunkRef[];
-  document_id: string;
-  s3_node: string;
-  metric?: string;
-  value?: string;
-  comparison?: string;
-  segment?: string;
-  timeframe?: string;
-};
-
-export type FindingBatch = {
-  batch_id: string;
-  findings: Finding[];
-};
-
-export type BatchInsightResult = {
-  batch_id: string;
-  insights: Insight[];
-};
-
 export type FindingRef = {
   finding_id: string;
   text?: string;
@@ -164,9 +151,6 @@ export type GraphState = {
   imageBlocks: ImageBlock[];
   documents: Document[];
   chunks: Chunk[];
-  findings: Finding[];
-  finding_batches: FindingBatch[];
-  batch_insights: BatchInsightResult[];
   imageChunks: ImageChunk[];
   insights: Insight[];
   sourceTextByS3Node: Record<string, string>;

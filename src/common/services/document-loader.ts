@@ -11,8 +11,16 @@ export type LoadedDocument = {
   contentType: string;
 };
 
-type UnstructuredElement = {
+export type UnstructuredElement = {
+  element_id?: string | null;
+  type?: string | null;
   text?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type LoadedDocumentElements = {
+  elements: UnstructuredElement[];
+  contentType: string;
 };
 
 let unstructuredClient: UnstructuredClient | null = null;
@@ -20,7 +28,7 @@ let unstructuredClient: UnstructuredClient | null = null;
 function getUnstructuredClient(): UnstructuredClient {
   if (!unstructuredClient) {
     unstructuredClient = new UnstructuredClient({
-      serverURL: "https://api.unstructuredapp.io",
+      serverURL: config.unstructuredApiUrl || "https://api.unstructuredapp.io",
       security: {
         apiKeyAuth: config.unstructuredApiKey,
       },
@@ -39,44 +47,53 @@ function getFileNameFromUrl(url: string): string {
   }
 }
 
-async function extractPdfWithUnstructured(
+function isPdfLike(url: string, contentType?: string): boolean {
+  if (contentType?.toLowerCase().includes("pdf")) return true;
+  return url.toLowerCase().endsWith(".pdf");
+}
+
+async function partitionWithUnstructured(
   url: string,
   buffer: ArrayBuffer,
-): Promise<string> {
+  contentType?: string,
+): Promise<UnstructuredElement[]> {
   const startedAt = Date.now();
-  console.debug("document-loader:extractPdfWithUnstructured:start", {
+  console.debug("document-loader:partitionWithUnstructured:start", {
     url,
     bufferBytes: buffer.byteLength,
+    contentType,
     hasApiKey: Boolean(config.unstructuredApiKey),
     apiUrl: config.unstructuredApiUrl ?? null,
   });
 
   if (!config.unstructuredApiKey) {
-    console.debug("document-loader:extractPdfWithUnstructured:error", {
+    console.debug("document-loader:partitionWithUnstructured:error", {
       url,
-      message: "UNSTRUCTURED_API_KEY is required for PDF extraction.",
+      message: "UNSTRUCTURED_API_KEY is required for document extraction.",
     });
     throw new Error(
-      "UNSTRUCTURED_API_KEY is required for PDF extraction.",
+      "UNSTRUCTURED_API_KEY is required for document extraction.",
     );
   }
 
   try {
     const client = getUnstructuredClient();
-    console.debug("document-loader:extractPdfWithUnstructured:client:ready", { url });
+    console.debug("document-loader:partitionWithUnstructured:client:ready", { url });
     const fileName = getFileNameFromUrl(url);
     const fileBuffer = Buffer.from(buffer);
-    console.debug("document-loader:extractPdfWithUnstructured:file:prepared", {
+    const pdfLike = isPdfLike(url, contentType);
+    console.debug("document-loader:partitionWithUnstructured:file:prepared", {
       url,
       fileName,
       fileBytes: fileBuffer.length,
+      pdfLike,
     });
-    console.debug("document-loader:extractPdfWithUnstructured:partition:start", {
+    console.debug("document-loader:partitionWithUnstructured:partition:start", {
       url,
       fileName,
       strategy: Strategy.HiRes,
-      splitPdfPage: true,
-      splitPdfConcurrencyLevel: 8,
+      splitPdfPage: pdfLike,
+      splitPdfConcurrencyLevel: pdfLike ? 8 : undefined,
     });
     let response: Awaited<ReturnType<typeof client.general.partition>>;
 
@@ -87,13 +104,17 @@ async function extractPdfWithUnstructured(
           fileName,
         },
         strategy: Strategy.HiRes,
-        splitPdfPage: true,
-        splitPdfAllowFailed: true,
-        splitPdfConcurrencyLevel: 8,
+        ...(pdfLike
+          ? {
+              splitPdfPage: true,
+              splitPdfAllowFailed: true,
+              splitPdfConcurrencyLevel: 8,
+            }
+          : {}),
       },
     });
 
-    console.debug("document-loader:extractPdfWithUnstructured:partition:done", {
+    console.debug("document-loader:partitionWithUnstructured:partition:done", {
       url,
       statusCode: response.statusCode ?? null,
       elementCount: response.elements?.length ?? 0,
@@ -107,40 +128,18 @@ async function extractPdfWithUnstructured(
     }
 
     const elements = (response.elements as UnstructuredElement[] | undefined) ?? [];
-    const textParts = elements.map((element) => element.text ?? "");
-    const nonEmptyElementCount = textParts.filter((part) => part.trim().length > 0).length;
-    console.debug("document-loader:extractPdfWithUnstructured:elements:stats", {
+    const nonEmptyElementCount = elements.filter(
+      (element) => (element.text ?? "").trim().length > 0,
+    ).length;
+    console.debug("document-loader:partitionWithUnstructured:elements:stats", {
       url,
       elementCount: elements.length,
       nonEmptyElementCount,
       emptyElementCount: elements.length - nonEmptyElementCount,
     });
-
-    const joinedText = textParts.filter(Boolean).join("\n\n");
-    const text = compactWhitespace(joinedText);
-    console.debug("document-loader:extractPdfWithUnstructured:text:built", {
-      url,
-      joinedLength: joinedText.length,
-      compactLength: text.length,
-    });
-
-    if (!text) {
-      console.debug("document-loader:extractPdfWithUnstructured:empty-text", {
-        url,
-        elementCount: elements.length,
-      });
-      throw new Error("Unstructured returned no text elements.");
-    }
-
-    console.debug("document-loader:extractPdfWithUnstructured:success", {
-      url,
-      extractedLength: text.length,
-      elementCount: elements.length,
-      elapsedMs: Date.now() - startedAt,
-    });
-    return text;
+    return elements;
   } catch (error) {
-    console.debug("document-loader:extractPdfWithUnstructured:error", {
+    console.debug("document-loader:partitionWithUnstructured:error", {
       url,
       message: error instanceof Error ? error.message : "Unknown error",
       stack: error instanceof Error ? error.stack : undefined,
@@ -150,6 +149,31 @@ async function extractPdfWithUnstructured(
   }
 }
 
+async function extractPdfWithUnstructured(
+  url: string,
+  buffer: ArrayBuffer,
+): Promise<string> {
+  const elements = await partitionWithUnstructured(url, buffer, "application/pdf");
+  const textParts = elements.map((element) => element.text ?? "");
+  const joinedText = textParts.filter(Boolean).join("\n\n");
+  const text = compactWhitespace(joinedText);
+
+  if (!text) {
+    console.debug("document-loader:extractPdfWithUnstructured:empty-text", {
+      url,
+      elementCount: elements.length,
+    });
+    throw new Error("Unstructured returned no text elements.");
+  }
+
+  console.debug("document-loader:extractPdfWithUnstructured:success", {
+    url,
+    extractedLength: text.length,
+    elementCount: elements.length,
+  });
+  return text;
+}
+
 function stripHtml(html: string): string {
   const withoutScripts = html.replace(/<script[\s\S]*?<\/script>/gi, " ");
   const withoutStyles = withoutScripts.replace(/<style[\s\S]*?<\/style>/gi, " ");
@@ -157,7 +181,7 @@ function stripHtml(html: string): string {
   return compactWhitespace(withoutTags);
 }
 
-function parseS3Url(url: string): { bucket: string; key: string } {
+export function parseS3Url(url: string): { bucket: string; key: string } {
   console.debug("document-loader:parseS3Url:start", { url });
   const trimmed = url.replace("s3://", "");
   const [bucket, ...rest] = trimmed.split("/");
@@ -170,7 +194,7 @@ function parseS3Url(url: string): { bucket: string; key: string } {
   return { bucket, key };
 }
 
-async function bodyToBuffer(body: unknown): Promise<Buffer> {
+export async function bodyToBuffer(body: unknown): Promise<Buffer> {
   console.debug("document-loader:bodyToBuffer:start", {
     hasBody: Boolean(body),
     bodyType: body ? typeof body : "nullish",
@@ -228,6 +252,80 @@ async function bodyToBuffer(body: unknown): Promise<Buffer> {
   throw new Error("Unsupported S3 body type.");
 }
 
+async function fetchS3Document(url: string): Promise<{ buffer: Buffer; contentType: string }> {
+  const { bucket, key } = parseS3Url(url);
+  const s3 = new S3Client({
+    credentials: getCachedAwsAssumeRoleProvider(),
+  });
+
+  console.debug("document-loader:fetchS3Document:getObject:start", { bucket, key });
+  const response = await s3.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    }),
+  );
+  const contentType = response.ContentType ?? "application/octet-stream";
+  const buffer = await bodyToBuffer(response.Body);
+  console.debug("document-loader:fetchS3Document:getObject:done", {
+    bucket,
+    key,
+    contentType,
+    bytes: buffer.byteLength,
+  });
+  return { buffer, contentType };
+}
+
+export async function loadDocumentElements(url: string): Promise<LoadedDocumentElements> {
+  console.debug("document-loader:loadDocumentElements:start", { url });
+  const controller = new AbortController();
+  setMaxListeners(25, controller.signal);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    config.requestTimeoutMs,
+  );
+
+  try {
+    let contentType = "application/octet-stream";
+    let buffer: ArrayBuffer;
+
+    if (url.startsWith("s3://")) {
+      const s3Document = await fetchS3Document(url);
+      contentType = s3Document.contentType;
+      buffer = Uint8Array.from(s3Document.buffer).buffer;
+    } else {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "user-agent": "aetio-ingestion/1.0",
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+      }
+      contentType = response.headers.get("content-type") ?? "application/octet-stream";
+      buffer = await response.arrayBuffer();
+    }
+
+    const elements = await partitionWithUnstructured(url, buffer, contentType);
+    console.debug("document-loader:loadDocumentElements:done", {
+      url,
+      contentType,
+      elementCount: elements.length,
+    });
+    return { elements, contentType };
+  } catch (error) {
+    console.debug("document-loader:loadDocumentElements:error", {
+      url,
+      message: error instanceof Error ? error.message : "Unknown error",
+      aborted: controller.signal.aborted,
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function loadDocumentText(url: string): Promise<LoadedDocument> {
   console.debug("document-loader:load:start", { url });
   const controller = new AbortController();
@@ -241,30 +339,7 @@ export async function loadDocumentText(url: string): Promise<LoadedDocument> {
   try {
     if (url.startsWith("s3://")) {
       console.debug("document-loader:load:s3:start", { url });
-      const { bucket, key } = parseS3Url(url);
-      const s3 = new S3Client({
-        credentials: getCachedAwsAssumeRoleProvider(),
-      });
-      console.debug("document-loader:load:s3:getObject:start", { bucket, key });
-      const response = await s3.send(
-        new GetObjectCommand({
-          Bucket: bucket,
-          Key: key,
-        }),
-      );
-      console.debug("document-loader:load:s3:getObject:done", {
-        bucket,
-        key,
-        contentType: response.ContentType ?? "text/plain",
-      });
-
-      const contentType = response.ContentType ?? "text/plain";
-      const buffer = await bodyToBuffer(response.Body);
-      console.debug("document-loader:load:s3:buffer", {
-        bucket,
-        key,
-        bytes: buffer.byteLength,
-      });
+      const { buffer, contentType } = await fetchS3Document(url);
       const decoder = new TextDecoder("utf-8");
       let text = decoder.decode(buffer);
       if (contentType.includes("application/pdf")) {

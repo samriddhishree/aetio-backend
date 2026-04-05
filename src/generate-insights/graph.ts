@@ -1,10 +1,7 @@
 import { Annotation, StateGraph } from "@langchain/langgraph";
 import type {
-  BatchInsightResult,
   Chunk,
   Document,
-  Finding,
-  FindingBatch,
   GraphState,
   Insight,
   InsightConfidence,
@@ -16,11 +13,7 @@ import type {
 import { assertConfig } from "../common/services/config";
 import { documentLoaderNode } from "./agents/documentLoader";
 import { chunkingNode } from "./agents/chunkingNode";
-//import { imageExtractionAgent } from "./agents/imageExtractionAgent";
-import { findingExtractionAgent } from "./agents/findingExtractionAgent";
-import { findingBatchingAgent } from "./agents/findingBatchingAgent";
 import { insightExtractionAgent } from "./agents/insightExtractionAgent";
-import { crossBatchMergeAgent } from "./agents/crossBatchMergeAgent";
 import { hierarchyFinalizeAgent } from "./agents/hierarchyFinalizeAgent";
 import { critiqueAgent } from "./agents/critiqueAgent";
 import { reviseAgent } from "./agents/reviseAgent";
@@ -74,28 +67,6 @@ const mergeInsights = (left: Insight[], right: Insight[]) => {
   return order.map((id) => byId.get(id)!).filter(Boolean);
 };
 
-const mergeFindings = (left: Finding[], right: Finding[]) => {
-  if (left.length === 0) return right;
-  if (right.length === 0) return left;
-
-  const byId = new Map<string, Finding>();
-  const order: string[] = [];
-
-  for (const finding of left) {
-    byId.set(finding.finding_id, finding);
-    order.push(finding.finding_id);
-  }
-
-  for (const finding of right) {
-    if (!byId.has(finding.finding_id)) {
-      order.push(finding.finding_id);
-    }
-    byId.set(finding.finding_id, finding);
-  }
-
-  return order.map((id) => byId.get(id)!).filter(Boolean);
-};
-
 const GraphStateAnnotation = Annotation.Root({
   outputUrls: Annotation<string[]>({ value: mergeArray, default: () => [] }),
   contextUrls: Annotation<string[] | undefined>({ value: overwrite, default: () => undefined }),
@@ -108,9 +79,6 @@ const GraphStateAnnotation = Annotation.Root({
   imageBlocks: Annotation<ImageBlock[]>({ value: mergeArray, default: () => [] }),
   documents: Annotation<Document[]>({ value: mergeArray, default: () => [] }),
   chunks: Annotation<Chunk[]>({ value: mergeArray, default: () => [] }),
-  findings: Annotation<Finding[]>({ value: mergeFindings, default: () => [] }),
-  finding_batches: Annotation<FindingBatch[]>({ value: overwrite, default: () => [] }),
-  batch_insights: Annotation<BatchInsightResult[]>({ value: overwrite, default: () => [] }),
   imageChunks: Annotation<ImageChunk[]>({ value: mergeArray, default: () => [] }),
   insights: Annotation<Insight[]>({ value: overwrite, default: () => [] }),
   critiqueByInsightId: Annotation<CritiqueMap>({
@@ -137,12 +105,8 @@ export function buildIngestionGraph(options?: { skipDocumentAndChunking?: boolea
 
   if (skipDocumentAndChunking) {
     return new StateGraph(GraphStateAnnotation)
-      // Finding extraction is a generalized evidence layer for both data-heavy and narrative documents.
-      .addNode("FindingExtractionAgent", (state) => findingExtractionAgent.process(state))
-      .addNode("FindingBatchingAgent", (state) => findingBatchingAgent.process(state))
-      //.addNode("ImageExtractionAgent", imageExtractionAgent)
+      // Findings layer removed: extraction now starts directly from chunks.
       .addNode("InsightExtractionAgent", insightExtractionAgent)
-      .addNode("CrossBatchMergeAgent", (state) => crossBatchMergeAgent.process(state))
       .addNode("CritiqueAgent", (state) => critiqueAgent.process(state))
       .addNode("ReviseAgent", (state) => reviseAgent.process(state))
       .addNode("ValidateAgent", (state) => validateAgent.process(state))
@@ -151,12 +115,8 @@ export function buildIngestionGraph(options?: { skipDocumentAndChunking?: boolea
       )
       .addNode("HierarchyFinalizeAgent", (state) => hierarchyFinalizeAgent.process(state))
       .addNode("PersistenceNode", persistenceNode)
-      .addEdge(START, "FindingExtractionAgent")
-      .addEdge("FindingExtractionAgent", "FindingBatchingAgent")
-      .addEdge("FindingBatchingAgent", "InsightExtractionAgent")
-      //.addEdge("ImageExtractionAgent", "InsightExtractionAgent")
-      .addEdge("InsightExtractionAgent", "CrossBatchMergeAgent")
-      .addEdge("CrossBatchMergeAgent", "CritiqueAgent")
+      .addEdge(START, "InsightExtractionAgent")
+      .addEdge("InsightExtractionAgent", "CritiqueAgent")
       .addEdge("CritiqueAgent", "ReviseAgent")
       .addEdge("ReviseAgent", "ValidateAgent")
       .addEdge("ValidateAgent", "MetadataConsolidationAgent")
@@ -169,12 +129,8 @@ export function buildIngestionGraph(options?: { skipDocumentAndChunking?: boolea
   return new StateGraph(GraphStateAnnotation)
     .addNode("DocumentLoader", documentLoaderNode)
     .addNode("ChunkingNode", chunkingNode)
-    // Finding extraction is a generalized evidence layer for both data-heavy and narrative documents.
-    .addNode("FindingExtractionAgent", (state) => findingExtractionAgent.process(state))
-    .addNode("FindingBatchingAgent", (state) => findingBatchingAgent.process(state))
-    //.addNode("ImageExtractionAgent", imageExtractionAgent)
+    // Findings layer removed: InsightExtractionAgent handles internal chunk grouping.
     .addNode("InsightExtractionAgent", insightExtractionAgent)
-    .addNode("CrossBatchMergeAgent", (state) => crossBatchMergeAgent.process(state))
     .addNode("CritiqueAgent", (state) => critiqueAgent.process(state))
     .addNode("ReviseAgent", (state) => reviseAgent.process(state))
     .addNode("ValidateAgent", (state) => validateAgent.process(state))
@@ -185,12 +141,8 @@ export function buildIngestionGraph(options?: { skipDocumentAndChunking?: boolea
     .addNode("PersistenceNode", persistenceNode)
     .addEdge(START, "DocumentLoader")
     .addEdge("DocumentLoader", "ChunkingNode")
-    .addEdge("ChunkingNode", "FindingExtractionAgent")
-    .addEdge("FindingExtractionAgent", "FindingBatchingAgent")
-    .addEdge("FindingBatchingAgent", "InsightExtractionAgent")
-    //.addEdge("ImageExtractionAgent", "InsightExtractionAgent")
-    .addEdge("InsightExtractionAgent", "CrossBatchMergeAgent")
-    .addEdge("CrossBatchMergeAgent", "CritiqueAgent")
+    .addEdge("ChunkingNode", "InsightExtractionAgent")
+    .addEdge("InsightExtractionAgent", "CritiqueAgent")
     .addEdge("CritiqueAgent", "ReviseAgent")
     .addEdge("ReviseAgent", "ValidateAgent")
     .addEdge("ValidateAgent", "MetadataConsolidationAgent")
@@ -219,9 +171,6 @@ export async function summarizeProject(
     imageBlocks: [],
     documents: [],
     chunks: [],
-    findings: [],
-    finding_batches: [],
-    batch_insights: [],
     imageChunks: [],
     insights: [],
     sourceTextByS3Node: {},
@@ -255,6 +204,7 @@ export async function summarizeProject(
       insight_id: insightId,
       parent_insight_id: undefined,
       text: summary,
+      evidence_snippet: summary,
       s3_node: `summary:${documentId}`,
       document_id: documentId,
       additional_refs: { contextUrls },
@@ -308,9 +258,6 @@ export async function runIngestionPipelineFromChunks(
     outputUrls: [],
     documents: [],
     chunks,
-    findings: [],
-    finding_batches: [],
-    batch_insights: [],
     imageChunks: [],
     insights: [],
     sourceTextByS3Node,

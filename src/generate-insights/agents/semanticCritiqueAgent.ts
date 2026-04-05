@@ -1,8 +1,8 @@
-import type { Finding, Insight, InsightConfidence } from "../../types";
+import type { Insight, InsightConfidence } from "../../types";
 import { config } from "../../common/services/config";
 import { OPENAI_HELPER_MODEL, openai } from "../../common/services/openai";
 import { chunkArray, mapWithConcurrency } from "../../common/services/utils";
-import { toCritiqueLLMInput, type FindingSummary } from "./llmInputProjections";
+import { toCritiqueLLMInput } from "./llmInputProjections";
 import { clampConfidence, sanitizeInsightConfidence } from "./insightConfidence";
 import {
   CRITIQUE_SEVERITIES,
@@ -24,10 +24,10 @@ const MAX_PARENT_CONTEXTS = 40;
 const MAX_SIBLING_CONTEXTS = 40;
 const MAX_CONTEXT_EVAL_CONCURRENCY = 3;
 const MAX_CONFIDENCE_REASONS = 2;
-const MAX_RELATED_FINDINGS = 4;
 const GENERIC_CUE =
   /\b(important|various|several|significant|changed materially|improved|declined|mixed performance)\b/i;
 const NUMBER_CUE = /\b\d+(?:\.\d+)?%?\b/;
+const MAX_EVIDENCE_SNIPPET_CHARS = 320;
 
 const ISSUE_CONFIDENCE_PENALTY: Partial<Record<CritiqueIssue["type"], number>> = {
   missing_support: 0.35,
@@ -72,7 +72,7 @@ Guidance:
 - Preserve high confidence for strong, specific, evidence-grounded insights.
 - Do not inflate confidence.
 - Keep reasoning concise and evidence-tied.
-- evidence_snippets are provided from FindingExtractionAgent (finding.evidence_snipped); evaluate them as provided and do not invent new snippets.
+- evidence_snippets are provided from extracted insights and chunk context; evaluate them as provided and do not invent new snippets.
 - Do not invent facts or criticism.
 - You MUST include one results[] entry for every allowed insight ID.
 
@@ -139,7 +139,6 @@ type CritiqueInsightView = {
   parent_insight_id?: string | null;
   metadata?: Insight["metadata"];
   evidence_snippets: EvidenceSnippet[];
-  related_findings?: FindingSummary[];
 };
 
 type StandaloneCritiqueContext = {
@@ -195,15 +194,13 @@ type ConfidenceAccumulator = {
 
 function toView(
   insight: Insight,
-  findingById: Map<string, Finding>,
-  findingsByChunkId: Map<string, Finding[]>,
+  chunkContextById: Map<string, string>,
   maxSnippets: number,
   childSummaries?: Array<{ insight_id: string; text: string }>,
 ): CritiqueInsightView {
   const projected = toCritiqueLLMInput(insight, {
-    evidence_snippets: getEvidenceSnippets(insight, findingById, findingsByChunkId, maxSnippets),
+    evidence_snippets: getEvidenceSnippets(insight, chunkContextById, maxSnippets),
     child_summaries: childSummaries,
-    related_findings: collectRelatedFindings(insight, findingById, findingsByChunkId),
   });
 
   return {
@@ -213,138 +210,69 @@ function toView(
     parent_insight_id: projected.parent_insight_id,
     metadata: projected.metadata,
     evidence_snippets: projected.evidence_snippets ?? [],
-    related_findings: projected.related_findings,
   };
+}
+
+function compactSnippet(value: string | undefined): string | undefined {
+  const compact = value?.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  if (compact.length <= MAX_EVIDENCE_SNIPPET_CHARS) return compact;
+  return `${compact.slice(0, MAX_EVIDENCE_SNIPPET_CHARS - 1).trimEnd()}...`;
 }
 
 function getEvidenceSnippets(
   insight: Insight,
-  findingById: Map<string, Finding>,
-  findingsByChunkId: Map<string, Finding[]>,
+  chunkContextById: Map<string, string>,
   maxSnippets: number,
 ): EvidenceSnippet[] {
   const seen = new Set<string>();
   const snippets: EvidenceSnippet[] = [];
-  const addSnippetFromFinding = (finding: Finding) => {
-    const snippet = finding.evidence_snipped?.trim();
+  const addSnippet = (chunkId: string, rawSnippet: string | undefined) => {
+    const snippet = compactSnippet(rawSnippet);
     if (!snippet) return;
-    const chunkId = finding.supporting_chunks?.[0]?.chunk_id || finding.finding_id;
     const dedupeKey = `${chunkId}|${snippet}`;
     if (seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
     snippets.push({ chunk_id: chunkId, snippet });
   };
 
-  for (const findingId of readFindingIds(insight)) {
-    if (snippets.length >= maxSnippets) break;
-    const finding = findingById.get(findingId);
-    if (!finding) continue;
-    addSnippetFromFinding(finding);
-  }
-  if (snippets.length >= maxSnippets) return snippets;
+  const primaryChunkId = insight.supporting_chunks?.[0]?.chunk_id ?? insight.insight_id;
+  addSnippet(primaryChunkId, insight.evidence_snippet);
+  if (snippets.length >= maxSnippets) return snippets.slice(0, maxSnippets);
 
   for (const ref of insight.supporting_chunks ?? []) {
-    const matches = findingsByChunkId.get(ref.chunk_id) ?? [];
-    for (const finding of matches) {
-      if (snippets.length >= maxSnippets) break;
-      addSnippetFromFinding(finding);
-    }
+    addSnippet(ref.chunk_id, chunkContextById.get(ref.chunk_id));
     if (snippets.length >= maxSnippets) break;
   }
 
   return snippets;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
-
-function readFindingIds(insight: Insight): string[] {
-  const record = asRecord(insight.additional_refs);
-  if (!record) return [];
-  const raw = record.finding_ids;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-}
-
-function toFindingSummary(finding: Finding): FindingSummary {
-  const supportingChunkIds = Array.from(
-    new Set(
-      (finding.supporting_chunks ?? [])
-        .map((ref) => ref.chunk_id?.trim())
-        .filter((chunkId): chunkId is string => Boolean(chunkId)),
-    ),
-  );
-  return {
-    finding_id: finding.finding_id,
-    text: finding.text,
-    evidence_snipped: finding.evidence_snipped,
-    evidence_type: finding.evidence_type,
-    supporting_chunk_ids: supportingChunkIds.length > 0 ? supportingChunkIds : undefined,
-  };
-}
-
-function buildFindingIndexes(state: GraphStateCRV): {
-  findingById: Map<string, Finding>;
-  findingsByChunkId: Map<string, Finding[]>;
-} {
-  const findingById = new Map<string, Finding>();
-  const findingsByChunkId = new Map<string, Finding[]>();
-
-  for (const finding of state.findings ?? []) {
-    findingById.set(finding.finding_id, finding);
-    for (const ref of finding.supporting_chunks ?? []) {
-      const chunkId = ref.chunk_id?.trim();
-      if (!chunkId) continue;
-      const list = findingsByChunkId.get(chunkId) ?? [];
-      list.push(finding);
-      findingsByChunkId.set(chunkId, list);
+function buildChunkContextById(state: GraphStateCRV): Map<string, string> {
+  const byId = new Map<string, string>();
+  // Findings state was removed, so critique grounding now reuses chunk/source text.
+  for (const chunk of state.chunks) {
+    const snippet = compactSnippet(chunk.content);
+    if (snippet) {
+      byId.set(chunk.chunk_id, snippet);
+      continue;
     }
+    const fallback = compactSnippet(state.sourceTextByS3Node[chunk.s3_node]);
+    if (fallback) byId.set(chunk.chunk_id, fallback);
   }
-
-  return { findingById, findingsByChunkId };
-}
-
-function collectRelatedFindings(
-  insight: Insight,
-  findingById: Map<string, Finding>,
-  findingsByChunkId: Map<string, Finding[]>,
-): FindingSummary[] | undefined {
-  const related = new Map<string, FindingSummary>();
-
-  for (const findingId of readFindingIds(insight)) {
-    const finding = findingById.get(findingId);
-    if (!finding) continue;
-    related.set(finding.finding_id, toFindingSummary(finding));
-    if (related.size >= MAX_RELATED_FINDINGS) break;
-  }
-
-  if (related.size < MAX_RELATED_FINDINGS) {
-    for (const ref of insight.supporting_chunks ?? []) {
-      const matches = findingsByChunkId.get(ref.chunk_id) ?? [];
-      for (const finding of matches) {
-        if (related.has(finding.finding_id)) continue;
-        related.set(finding.finding_id, toFindingSummary(finding));
-        if (related.size >= MAX_RELATED_FINDINGS) break;
-      }
-      if (related.size >= MAX_RELATED_FINDINGS) break;
-    }
-  }
-
-  return related.size > 0 ? Array.from(related.values()) : undefined;
+  return byId;
 }
 
 function buildContexts(state: GraphStateCRV): SemanticCritiqueContext[] {
   const insightById = new Map(state.insights.map((insight) => [insight.insight_id, insight]));
-  const { findingById, findingsByChunkId } = buildFindingIndexes(state);
+  const chunkContextById = buildChunkContextById(state);
   const contexts: SemanticCritiqueContext[] = [];
 
   const standaloneContexts = state.insights
     .slice(0, MAX_STANDALONE_CONTEXTS)
     .map<StandaloneCritiqueContext>((insight) => ({
       context_type: "standalone",
-      insight: toView(insight, findingById, findingsByChunkId, MAX_SNIPPETS_PER_INSIGHT),
+      insight: toView(insight, chunkContextById, MAX_SNIPPETS_PER_INSIGHT),
     }));
   contexts.push(...standaloneContexts);
 
@@ -362,22 +290,21 @@ function buildContexts(state: GraphStateCRV): SemanticCritiqueContext[] {
     if (!parent || children.length === 0) continue;
 
     const limitedChildren = children.slice(0, MAX_CHILDREN_IN_PARENT_CONTEXT);
-    parentContexts.push({
-      context_type: "parent_children",
-      parent: toView(
-        parent,
-        findingById,
-        findingsByChunkId,
-        MAX_SNIPPETS_PER_INSIGHT,
-        limitedChildren.map((child) => ({
-          insight_id: child.insight_id,
-          text: child.text,
-        })),
-      ),
-      children: limitedChildren.map((child) =>
-        toView(child, findingById, findingsByChunkId, MAX_SNIPPETS_PER_INSIGHT)
-      ),
-    });
+      parentContexts.push({
+        context_type: "parent_children",
+        parent: toView(
+          parent,
+          chunkContextById,
+          MAX_SNIPPETS_PER_INSIGHT,
+          limitedChildren.map((child) => ({
+            insight_id: child.insight_id,
+            text: child.text,
+          })),
+        ),
+        children: limitedChildren.map((child) =>
+          toView(child, chunkContextById, MAX_SNIPPETS_PER_INSIGHT)
+        ),
+      });
   }
   contexts.push(...parentContexts.slice(0, MAX_PARENT_CONTEXTS));
 
@@ -402,7 +329,7 @@ function buildContexts(state: GraphStateCRV): SemanticCritiqueContext[] {
         document_id: batch[0]?.document_id ?? "",
         parent_insight_id: parentId,
         parent_text: parent?.text,
-        siblings: batch.map((insight) => toView(insight, findingById, findingsByChunkId, 1)),
+        siblings: batch.map((insight) => toView(insight, chunkContextById, 1)),
       });
     }
   }

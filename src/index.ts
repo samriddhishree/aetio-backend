@@ -2,18 +2,24 @@ import express, { Request, Response } from "express";
 import cors from 'cors';
 import crypto from "crypto";
 import { handler, type GenerateInsightsArguments } from "./generate-insights/handler";
+import {
+  generateInsightsV2Handler,
+  type GenerateInsightsV2Arguments,
+} from "./generate-insights-v2/handler";
 import { runIngestionPipelineFromChunks, summarizeProject } from "./generate-insights/graph";
 import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
-  deleteAllInsights,
+  deleteAllInsightsWithInsightIds,
   deleteInsightsByProjectId,
   getInsightById,
   listInsights,
   persistInsights,
+  updateInsight,
   type InsightFilters,
   type InsightFilterKey,
 } from "./common/services/dynamo";
-import { InsightSearchRepository } from "./common/services/repository";
+import { deleteInsightDocuments, upsertInsightDocument } from "./common/services/elasticsearch";
+import { toOpenSearchInsightDocument } from "./generate-insights-v2/services/familyPersistence";
 
 import type { Chunk, FindingRef, Insight } from "./types";
 import { config  } from "./common/services/config";
@@ -27,16 +33,8 @@ type FormattedInsight = Insight & {
   sub_insights?: Insight[];
 };
 
-type InsightTreeResponse = {
-  insight: Insight[];
-  children: Insight[];
-  parents: Insight[];
-  siblings: Insight[];
-};
-
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
-const insightSearchRepository = new InsightSearchRepository();
 const allowedOrigins = ['http://localhost:5001','https://main.d27ng47b6pfw44.amplifyapp.com']; // Replace with your frontend origins
 // CORS middleware
 app.use(cors({
@@ -57,7 +55,7 @@ app.use(cors({
   credentials: true, // if you need cookies
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
 const allowedInsightFilters: InsightFilterKey[] = [
   "insight_id",
   "project_id",
@@ -73,6 +71,30 @@ type AcceptStatusCounts = {
   countDeclined: number;
 };
 
+type AcceptStreamEvent =
+  | {
+      type: "insight_persisted";
+      index: number;
+      insight_id: string;
+      status?: string;
+    }
+  | {
+      type: "project_counts_updated";
+      project_id: string;
+      countAccepted: number;
+      countDeclined: number;
+    }
+  | {
+      type: "complete";
+      updated: number;
+      countAccepted: number;
+      countDeclined: number;
+    }
+  | {
+      type: "error";
+      message: string;
+    };
+
 app.get("/health", (_req, res) => {
   res.status(200).send("ok");
 });
@@ -84,6 +106,7 @@ const toObjectRecord = (value: unknown): Record<string, unknown> =>
 
 const normalizeInsightStatus = (insight: Insight): Insight => ({
   ...insight,
+  evidence_snippet: insight.evidence_snippet?.trim() || insight.text,
   status: insight.status?.toLowerCase() === "declined" ? insight.status : "Accepted",
 });
 
@@ -97,6 +120,59 @@ const countInsightStatuses = (insights: Insight[]): AcceptStatusCounts =>
     },
     { countAccepted: 0, countDeclined: 0 },
   );
+
+const incrementStatusCounts = (counts: AcceptStatusCounts, insight: Insight): void => {
+  const normalizedStatus = insight.status?.toLowerCase();
+  if (normalizedStatus === "accepted") counts.countAccepted += 1;
+  if (normalizedStatus === "declined") counts.countDeclined += 1;
+};
+
+const isNdjsonRequest = (req: Request): boolean =>
+  (req.header("content-type") ?? "").toLowerCase().includes("application/x-ndjson");
+
+const writeAcceptStreamEvent = (res: Response, event: AcceptStreamEvent): void => {
+  res.write(`${JSON.stringify(event)}\n`);
+};
+
+const toInsightFromStreamLine = (line: string): Insight => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    throw new Error("Received invalid JSON line while streaming insights.");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Each streamed line must be a JSON object.");
+  }
+
+  const insight = parsed as Insight;
+  if (!insight.insight_id || typeof insight.insight_id !== "string") {
+    throw new Error("Each streamed insight must include insight_id.");
+  }
+
+  return insight;
+};
+
+const extractInsightUpdatePatch = (body: unknown): Partial<Insight> => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return {};
+  }
+
+  const payload = body as Partial<Insight>;
+  const patch: Partial<Insight> = {};
+
+  if (typeof payload.text === "string") patch.text = payload.text;
+  if (typeof payload.summary === "string") patch.summary = payload.summary;
+  if (Array.isArray(payload.metadata)) patch.metadata = payload.metadata;
+  if (typeof payload.status === "string") patch.status = payload.status;
+  if ("additional_refs" in payload) patch.additional_refs = payload.additional_refs;
+  if (typeof payload.family_text === "string") patch.family_text = payload.family_text;
+  if (typeof payload.question_answered === "string") patch.question_answered = payload.question_answered;
+  if (typeof payload.evidence_snippet === "string") patch.evidence_snippet = payload.evidence_snippet;
+
+  return patch;
+};
 
 const addProjectAcceptCountsOnCompleted = (
   insights: Insight[],
@@ -261,57 +337,6 @@ app.get("/insights", async (req: Request, res: Response) => {
   }
 });
 
-app.get("/insight/:insightId", async (req: Request, res: Response) => {
-  const insightId = req.params.insightId;
-  if (!insightId) {
-    return res.status(400).json({ error: "insightId is required in path" });
-  }
-
-  try {
-    console.log("getInsightById:start", { insightId });
-    const insight = await getInsightById(insightId);
-    if (!insight) {
-      return res.status(404).json({ error: `Insight not found: ${insightId}` });
-    }
-    return res.json(insight);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return res.status(500).json({ error: message });
-  }
-});
-
-app.get("/insight/tree/:insightId", async (req: Request, res: Response) => {
-  const insightId = req.params.insightId;
-  if (!insightId) {
-    return res.status(400).json({ error: "insightId is required in path" });
-  }
-
-  try {
-    const insight = await insightSearchRepository.getInsightById(insightId);
-    if (!insight) {
-      return res.status(404).json({ error: `Insight not found: ${insightId}` });
-    }
-
-    const [children, parent, siblings] = await Promise.all([
-      insightSearchRepository.getChildInsights(insightId, 200),
-      insightSearchRepository.getParentInsight(insightId),
-      insightSearchRepository.getSiblingInsights(insightId, 200),
-    ]);
-
-    const response: InsightTreeResponse = {
-      insight: [insight],
-      children,
-      parents: parent ? [parent] : [],
-      siblings,
-    };
-
-    return res.json(response);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return res.status(500).json({ error: message });
-  }
-});
-
 app.get("/formatted-insights", async (req: Request, res: Response) => {
   const parsedFilters = extractInsightFilters(req.query);
   if ("error" in parsedFilters) {
@@ -331,10 +356,68 @@ app.get("/formatted-insights", async (req: Request, res: Response) => {
   }
 });
 
+app.patch(["/insight/:insightId", "/insights/:insightId"], async (req: Request, res: Response) => {
+  const insightId = req.params.insightId?.trim();
+  if (!insightId) {
+    return res.status(400).json({ error: "insightId is required in path" });
+  }
+
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const patch = extractInsightUpdatePatch(req.body);
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: "No editable insight fields provided in request body" });
+  }
+
+  try {
+    const existingInsight = await getInsightById(insightId);
+    if (!existingInsight) {
+      return res.status(404).json({ error: `Insight not found: ${insightId}` });
+    }
+
+    if (existingInsight.user_id && existingInsight.user_id !== jwtUserId) {
+      return res.status(403).json({ error: "Forbidden for requested insightId" });
+    }
+
+    const nextInsight: Insight = {
+      ...existingInsight,
+      ...patch,
+      insight_id: insightId,
+      user_id: existingInsight.user_id ?? jwtUserId,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await updateInsight(nextInsight);
+    await upsertInsightDocument(toOpenSearchInsightDocument(nextInsight));
+    return res.status(200).json({ insight: nextInsight });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
 app.delete("/insights/deleteAll", async (_req: Request, res: Response) => {
   try {
-    const deleted = await deleteAllInsights();
-    return res.json({ deleted });
+    const { deletedCount, insightIds } = await deleteAllInsightsWithInsightIds();
+
+    try {
+      await deleteInsightDocuments(insightIds);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return res.status(500).json({
+        error: `Dynamo delete succeeded but OpenSearch delete failed: ${message}`,
+        deleted: deletedCount,
+        attemptedOpenSearchDeletes: insightIds.length,
+      });
+    }
+
+    return res.json({
+      deleted: deletedCount,
+      deletedFromOpenSearch: insightIds.length,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
@@ -362,6 +445,107 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
     return res.status(400).json({ error: "projectId is required in path" });
   }
 
+  if (isNdjsonRequest(req)) {
+    res.status(200);
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const counts: AcceptStatusCounts = { countAccepted: 0, countDeclined: 0 };
+    let persistedCount = 0;
+    let projectInsightFromPayload: Insight | undefined;
+    let buffer = "";
+
+    try {
+      for await (const chunk of req) {
+        buffer += chunk.toString("utf8");
+
+        let newlineIndex = buffer.indexOf("\n");
+        while (newlineIndex >= 0) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+
+          if (!line) {
+            newlineIndex = buffer.indexOf("\n");
+            continue;
+          }
+
+          const parsedInsight = toInsightFromStreamLine(line);
+          const normalizedInsight = normalizeInsightStatus(parsedInsight);
+          incrementStatusCounts(counts, normalizedInsight);
+
+          if (normalizedInsight.insight_id === projectId) {
+            projectInsightFromPayload = normalizedInsight;
+          } else {
+            await persistInsights([normalizedInsight]);
+            persistedCount += 1;
+            writeAcceptStreamEvent(res, {
+              type: "insight_persisted",
+              index: persistedCount,
+              insight_id: normalizedInsight.insight_id,
+              status: normalizedInsight.status,
+            });
+          }
+
+          newlineIndex = buffer.indexOf("\n");
+        }
+      }
+
+      const trailingLine = buffer.trim();
+      if (trailingLine.length > 0) {
+        const parsedInsight = toInsightFromStreamLine(trailingLine);
+        const normalizedInsight = normalizeInsightStatus(parsedInsight);
+        incrementStatusCounts(counts, normalizedInsight);
+        if (normalizedInsight.insight_id === projectId) {
+          projectInsightFromPayload = normalizedInsight;
+        } else {
+          await persistInsights([normalizedInsight]);
+          persistedCount += 1;
+          writeAcceptStreamEvent(res, {
+            type: "insight_persisted",
+            index: persistedCount,
+            insight_id: normalizedInsight.insight_id,
+            status: normalizedInsight.status,
+          });
+        }
+      }
+
+      if (projectInsightFromPayload) {
+        const [projectInsight] = addProjectAcceptCountsOnCompleted(
+          [projectInsightFromPayload],
+          projectId,
+          counts,
+        );
+        await persistInsights([projectInsight]);
+        persistedCount += 1;
+        writeAcceptStreamEvent(res, {
+          type: "project_counts_updated",
+          project_id: projectId,
+          countAccepted: counts.countAccepted,
+          countDeclined: counts.countDeclined,
+        });
+      }
+
+      writeAcceptStreamEvent(res, {
+        type: "complete",
+        updated: persistedCount,
+        countAccepted: counts.countAccepted,
+        countDeclined: counts.countDeclined,
+      });
+      res.end();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      writeAcceptStreamEvent(res, {
+        type: "error",
+        message,
+      });
+      res.end();
+      return;
+    }
+  }
+
   const body = req.body as Insight[] | { insights?: Insight[] };
   const insights = Array.isArray(body) ? body : body?.insights;
   console.log("Received insights for acceptance", insights);
@@ -380,6 +564,36 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
   try {
     await persistInsights(updatedInsights);
     return res.json({ updated: updatedInsights.length, items: updatedInsights });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post("/insights/:insightId/opensearch", async (req: Request, res: Response) => {
+  const insightId = req.params.insightId?.trim();
+  if (!insightId) {
+    return res.status(400).json({ error: "insightId is required in path" });
+  }
+
+  try {
+    const insight = await getInsightById(insightId);
+    if (!insight) {
+      return res.status(404).json({ error: `Insight not found: ${insightId}` });
+    }
+
+    const jwtUserId = getJwtUserId(req);
+    if (jwtUserId && insight.user_id && insight.user_id !== jwtUserId) {
+      return res.status(403).json({ error: "Forbidden for requested insightId" });
+    }
+
+    const searchDocument = toOpenSearchInsightDocument(insight);
+    await upsertInsightDocument(searchDocument);
+    return res.status(200).json({
+      insight_id: insightId,
+      indexed: true,
+      index: config.openSearchIndex,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
@@ -412,6 +626,57 @@ app.post("/generateInsights", async (req: Request, res: Response) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message, requestId });
+  }
+});
+
+app.post("/generate-insights-v2", async (req: Request, res: Response) => {
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const payload = {
+    ...toObjectRecord(req.body),
+    userId: jwtUserId,
+  } as GenerateInsightsV2Arguments;
+
+  const outputUrlsRaw = payload.outputUrls ?? payload.sourceUris;
+  if (!Array.isArray(outputUrlsRaw) || outputUrlsRaw.length === 0) {
+    return res.status(400).json({
+      error: "outputUrls is required and must be a non-empty array (or use sourceUris alias).",
+    });
+  }
+  const contextUrlsRaw = Array.isArray(payload.contextUrls) ? payload.contextUrls : [];
+  const researchContext =
+    typeof payload.researchContext === "string" ? payload.researchContext : undefined;
+
+  const requestId = req.header("x-request-id") ?? crypto.randomUUID();
+  console.info("[generate-insights-v2] starting request", {
+    requestId,
+    userId: jwtUserId,
+    outputUrls: outputUrlsRaw.length,
+    contextUrls: contextUrlsRaw.length,
+    hasResearchContext: Boolean(researchContext?.trim()),
+  });
+
+  try {
+    const result = await generateInsightsV2Handler({ arguments: payload });
+    console.info("[generate-insights-v2] completed request", {
+      requestId,
+      documents: result.documents.length,
+      findings: result.findings.length,
+      families: result.insight_families.length,
+      rows: result.insight_rows.length,
+      insightFamilyData: result.insight_family_data.length,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.warn("[generate-insights-v2] failed request", {
+      requestId,
+      message,
+    });
     return res.status(500).json({ error: message, requestId });
   }
 });

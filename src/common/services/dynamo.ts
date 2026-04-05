@@ -2,8 +2,8 @@ import type { WriteRequest } from "@aws-sdk/client-dynamodb";
 import { DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   BatchWriteCommand,
+  DeleteCommand,
   DynamoDBDocumentClient,
-  QueryCommand,
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -26,6 +26,7 @@ const MAX_RETRIES = 5;
 
 export type InsightFilterKey =
   | "insight_id"
+  | "object_type"
   | "project_id"
   | "parent_insight_id"
   | "text"
@@ -140,6 +141,27 @@ export async function updateInsight(insight: Insight): Promise<void> {
     throw error;
   }
 }
+
+export async function getInsightById(insightId: string): Promise<Insight | undefined> {
+  if (!insightId || insightId.trim().length === 0) return undefined;
+  const items = await listInsights({ insight_id: insightId });
+  return items[0];
+}
+
+export async function deleteInsightById(insightId: string): Promise<void> {
+  if (!insightId || insightId.trim().length === 0) {
+    throw new Error("deleteInsightById requires a non-empty insightId");
+  }
+
+  console.debug("dynamo:deleteInsightById:start", { insightId });
+  await docClient.send(
+    new DeleteCommand({
+      TableName: config.ddbTableName,
+      Key: { insight_id: insightId },
+    }),
+  );
+  console.debug("dynamo:deleteInsightById:done", { insightId });
+}
 // TODO: Get rid of Scan
 export async function listInsights(filters: InsightFilters = {}): Promise<Insight[]> {
   const filterEntries = Object.entries(filters).filter(([, value]) => value !== undefined);
@@ -201,28 +223,15 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
   return items;
 }
 
-export async function getInsightById(insightId: string): Promise<Insight | undefined> {
-  if (!insightId) return undefined;
-
-  const response = await docClient.send(
-    new QueryCommand({
-      TableName: config.ddbTableName,
-      IndexName: "GSI_insight_id",
-      KeyConditionExpression: "#insight_id = :insight_id",
-      ExpressionAttributeNames: {
-        "#insight_id": "insight_id",
-      },
-      ExpressionAttributeValues: {
-        ":insight_id": insightId,
-      },
-      Limit: 1,
-    }),
-  );
-  console.log("getInsightById", { response});
-  return (response.Items?.[0] as Insight | undefined) ?? undefined;
+export async function deleteAllInsights(): Promise<number> {
+  const { deletedCount } = await deleteAllInsightsWithInsightIds();
+  return deletedCount;
 }
 
-export async function deleteAllInsights(): Promise<number> {
+export async function deleteAllInsightsWithInsightIds(): Promise<{
+  deletedCount: number;
+  insightIds: string[];
+}> {
   const describe = await client.send(
     new DescribeTableCommand({ TableName: config.ddbTableName }),
   );
@@ -242,10 +251,16 @@ export async function deleteAllInsights(): Promise<number> {
     },
     {},
   );
-  const projectionExpression = Object.keys(expressionAttributeNames).join(", ");
+  const projectionTokens = Object.keys(expressionAttributeNames);
+  if (!keyAttributes.includes("insight_id")) {
+    expressionAttributeNames["#insight_id"] = "insight_id";
+    projectionTokens.push("#insight_id");
+  }
+  const projectionExpression = projectionTokens.join(", ");
 
   let deletedCount = 0;
   let ExclusiveStartKey: Record<string, unknown> | undefined;
+  const insightIds = new Set<string>();
 
   do {
     const response = await docClient.send(
@@ -256,6 +271,13 @@ export async function deleteAllInsights(): Promise<number> {
         ExclusiveStartKey,
       }),
     );
+
+    for (const item of response.Items ?? []) {
+      const insightId = item.insight_id;
+      if (typeof insightId === "string" && insightId.trim().length > 0) {
+        insightIds.add(insightId);
+      }
+    }
 
     const keys = (response.Items ?? [])
       .map((item) => {
@@ -309,7 +331,7 @@ export async function deleteAllInsights(): Promise<number> {
     ExclusiveStartKey = response.LastEvaluatedKey;
   } while (ExclusiveStartKey);
 
-  return deletedCount;
+  return { deletedCount, insightIds: Array.from(insightIds) };
 }
 
 export async function deleteInsightsByProjectId(projectId: string): Promise<number> {

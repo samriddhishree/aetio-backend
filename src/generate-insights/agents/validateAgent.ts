@@ -68,6 +68,13 @@ export class ValidateAgent {
           document_id: insight.document_id,
         });
       }
+      if (!insight.evidence_snippet || insight.evidence_snippet.trim().length === 0) {
+        errors.push({
+          stage: "ValidateAgent",
+          message: `Insight ${insight.insight_id} missing evidence_snippet.`,
+          document_id: insight.document_id,
+        });
+      }
 
       let metadata = consolidateMetadata(insight.metadata) ?? [];
       metadata = metadata.filter((entry) => ALLOWED_METADATA_TAGS.has(normalizeTag(entry.tag)));
@@ -107,6 +114,8 @@ export class ValidateAgent {
 
       validated.push({
         ...insight,
+        // Preserve a non-empty evidence_snippet for downstream persistence/search.
+        evidence_snippet: insight.evidence_snippet?.trim() || insight.text,
         parent_insight_id: parentId,
         metadata: alignedMetadata.length > 0 ? alignedMetadata : undefined,
         confidence: applyValidationConfidence(insight, unresolvedHighIssueTypes),
