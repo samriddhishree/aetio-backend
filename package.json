@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "ts-node-dev --env-file=.env --respawn --transpile-only src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "npm ci --include=dev && npm run build && npm prune --omit=dev && node -r dotenv/config dist/index.js",
+    "start": "npm i && npm run build && node -r dotenv/config dist/index.js",
     "test": "node -r dotenv/config ./node_modules/vitest/vitest.mjs run",
     "test:v2": "node -r dotenv/config scripts/generate-insights-v2-test.mjs",
     "test:family-persistence": "node -r dotenv/config scripts/familyPersistence.test.mjs",
@@ -32,7 +32,6 @@
     "unstructured-client": "^0.16.0"
   },
   "devDependencies": {
-    "@rollup/rollup-darwin-arm64": "^4.60.0",
     "@types/express": "^4.17.21",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.3",
