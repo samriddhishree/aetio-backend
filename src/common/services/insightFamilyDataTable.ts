@@ -1,4 +1,9 @@
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DeleteCommand,
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { getCachedAwsAssumeRoleProvider } from "./aws";
 import { config } from "./config";
@@ -75,6 +80,21 @@ export async function putInsightFamilyData(record: PersistedInsightFamilyData): 
   );
 }
 
+export async function getInsightFamilyData(
+  tableId: string,
+): Promise<PersistedInsightFamilyData | undefined> {
+  if (!tableId || tableId.trim().length === 0) return undefined;
+
+  const response = await docClient.send(
+    new GetCommand({
+      TableName: config.insightFamilyDataTableName,
+      Key: { table_id: tableId },
+    }),
+  );
+
+  return response.Item as PersistedInsightFamilyData | undefined;
+}
+
 export async function deleteInsightFamilyData(tableId: string): Promise<void> {
   await docClient.send(
     new DeleteCommand({
@@ -87,60 +107,60 @@ export async function deleteInsightFamilyData(tableId: string): Promise<void> {
 export async function listInsightFamilyData(
   filters: InsightFamilyDataFilters = {},
 ): Promise<PersistedInsightFamilyData[]> {
-  const filterEntries = Object.entries(filters).filter(([, value]) => value !== undefined);
-  const names: Record<string, string> = {};
-  const values: Record<string, unknown> = {};
-  const conditions: string[] = [];
+  const filterEntries = Object.entries(filters).filter(([, value]) => value !== undefined) as Array<
+    [InsightFamilyDataFilterKey, string | string[] | null]
+  >;
 
-  for (const [key, value] of filterEntries) {
-    const nameKey = `#${key}`;
-    names[nameKey] = key;
-
-    if (value === null) {
-      conditions.push(`attribute_not_exists(${nameKey})`);
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      const orParts: string[] = [];
-      value.forEach((entry, index) => {
-        const valueKey = `:${key}_${index}`;
-        values[valueKey] = entry;
-        orParts.push(`${nameKey} = ${valueKey}`);
-      });
-
-      if (orParts.length > 0) {
-        conditions.push(`(${orParts.join(" OR ")})`);
-      }
-      continue;
-    }
-
-    const valueKey = `:${key}`;
-    values[valueKey] = value;
-    conditions.push(`${nameKey} = ${valueKey}`);
+  if (filterEntries.length === 0) {
+    throw new Error(
+      "listInsightFamilyData requires at least one filter. Without a fixed secondary index, only table_id lookups are supported.",
+    );
   }
 
-  let lastEvaluatedKey: Record<string, unknown> | undefined;
-  const items: PersistedInsightFamilyData[] = [];
-
-  do {
-    const response = await docClient.send(
-      new ScanCommand({
-        TableName: config.insightFamilyDataTableName,
-        ...(conditions.length > 0
-          ? {
-              FilterExpression: conditions.join(" AND "),
-              ExpressionAttributeNames: names,
-              ExpressionAttributeValues: values,
-            }
-          : {}),
-        ExclusiveStartKey: lastEvaluatedKey,
-      }),
+  if (filters.table_id === undefined) {
+    throw new Error(
+      "listInsightFamilyData currently supports table_id lookups only. Add a fixed GSI if you need family_id/project_id/user_id/status/s3_node queries.",
     );
+  }
 
-    items.push(...((response.Items ?? []) as PersistedInsightFamilyData[]));
-    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
-  } while (lastEvaluatedKey);
+  const tableIds = normalizeFilterValues(filters.table_id);
+  const items = await Promise.all(tableIds.map((tableId) => getInsightFamilyData(tableId)));
 
-  return items;
+  return items
+    .filter((item): item is PersistedInsightFamilyData => Boolean(item))
+    .filter((item) => matchesFilters(item, filters));
+}
+
+function normalizeFilterValues(value: string | string[] | null | undefined): string[] {
+  if (value === null || value === undefined) return [];
+  if (Array.isArray(value)) return Array.from(new Set(value));
+  return [value];
+}
+
+function matchesFilters(
+  item: PersistedInsightFamilyData,
+  filters: InsightFamilyDataFilters,
+): boolean {
+  for (const [rawKey, rawValue] of Object.entries(filters) as Array<
+    [InsightFamilyDataFilterKey, string | string[] | null | undefined]
+  >) {
+    if (rawValue === undefined) continue;
+
+    const itemValue = item[rawKey];
+
+    if (rawValue === null) {
+      if (itemValue !== undefined) return false;
+      continue;
+    }
+
+    if (Array.isArray(rawValue)) {
+      if (typeof itemValue !== "string") return false;
+      if (!rawValue.includes(itemValue)) return false;
+      continue;
+    }
+
+    if (itemValue !== rawValue) return false;
+  }
+
+  return true;
 }

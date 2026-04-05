@@ -1,7 +1,6 @@
 import express, { Request, Response } from "express";
 import cors from 'cors';
 import crypto from "crypto";
-import { handler, type GenerateInsightsArguments } from "./generate-insights/handler";
 import {
   generateInsightsV2Handler,
   type GenerateInsightsV2Arguments,
@@ -23,11 +22,6 @@ import { toOpenSearchInsightDocument } from "./generate-insights-v2/services/fam
 
 import type { Chunk, FindingRef, Insight } from "./types";
 import { config  } from "./common/services/config";
-
-type GenerateInsightsResponse = {
-  status: "accepted";
-  requestId: string;
-};
 
 type FormattedInsight = Insight & {
   sub_insights?: Insight[];
@@ -597,36 +591,6 @@ app.post("/insights/:insightId/opensearch", async (req: Request, res: Response) 
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
-  }
-});
-
-app.post("/generateInsights", async (req: Request, res: Response) => {
-  const jwtUserId = getJwtUserId(req);
-  if (!jwtUserId) {
-    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
-  }
-  const payload = {
-    ...toObjectRecord(req.body),
-    userId: jwtUserId,
-  } as GenerateInsightsArguments;
-  console.log("payload", payload);
-  if (!payload?.outputUrls || payload.outputUrls.length === 0) {
-    return res.status(400).json({ error: "outputUrls is required" });
-  }
-
-  const requestId = req.header("x-request-id") ?? crypto.randomUUID();
-
-  try {
-    const result = await handler({ arguments: payload });
-    const parsed = JSON.parse(result) as Record<string, unknown>;
-    return res.status(202).json({
-      status: "accepted",
-      requestId,
-      ...parsed,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return res.status(500).json({ error: message, requestId });
   }
 });
 

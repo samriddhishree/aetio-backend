@@ -23,15 +23,15 @@ npm start
 ## Integration test
 
 ```bash
-npm run test:integration
+npm run test:v2
 ```
 
 Environment variables often used in tests/scripts:
 
 - `AETIO_BACKEND_URL`
-- `AETIO_TEST_USER_ID`
-- `AETIO_TEST_OUTPUT_URL`
-- `AETIO_TEST_CONTEXT_URL`
+- `GENERATE_INSIGHTS_V2_TEST_OUTPUT_URIS`
+- `GENERATE_INSIGHTS_V2_TEST_CONTEXT_URIS`
+- `GENERATE_INSIGHTS_V2_TEST_RESEARCH_CONTEXT`
 
 ## API Overview
 
@@ -45,7 +45,6 @@ Public endpoints:
 - `DELETE /insights/deleteAll`
 - `DELETE /project/:projectId`
 - `PATCH /insights/accept/:projectId`
-- `POST /generateInsights`
 - `POST /generate-insights-v2`
 
 Note: Insight detail endpoints (`GET /insight/:insightId`, `GET /insight/tree/:insightId`) are served by `aetio-search`.
@@ -126,7 +125,7 @@ System diagram:
 flowchart LR
   C[Client] --> API[Express /insights]
   API --> F[Filter parsing/validation]
-  F --> DDB[(DynamoDB listInsights Scan)]
+  F --> DDB[(DynamoDB Query on table key or GSI)]
   DDB --> API
   API --> C
 ```
@@ -170,7 +169,7 @@ System diagram:
 ```mermaid
 flowchart LR
   C[Client] --> API[Express /formatted-insights]
-  API --> DDB[(DynamoDB listInsights Scan)]
+  API --> DDB[(DynamoDB Query on table key or GSI)]
   DDB --> API
   API --> M[In-memory parent/child formatting]
   M --> C
@@ -203,7 +202,7 @@ System diagram:
 ```mermaid
 flowchart LR
   C[Client] --> API[Express /insights/deleteAll]
-  API --> DDB[(DynamoDB describe + scan + batch delete)]
+  API --> DDB[(DynamoDB delete-all disabled without indexed partition strategy)]
   DDB --> API
   API --> C
 ```
@@ -312,131 +311,6 @@ flowchart LR
   API --> C
 ```
 
----
-
-## `POST /generateInsights`
-
-Description: Kicks off the insight generation pipeline and returns a `202 Accepted` response when processing completes successfully in-process.
-
-Input:
-
-- Body:
-
-```json
-{
-  "userInfo": {
-    "full_name": "Jane Doe",
-    "email_address": "jane@example.com"
-  },
-  "user_info": {
-    "full_name": "Jane Doe",
-    "email_address": "jane@example.com"
-  },
-  "outputUrls": ["https://example.com/report.pdf"],
-  "contextUrls": ["https://example.com/context.pdf"],
-  "researchContext": "Optional project context",
-  "image_blocks": [
-    { "block_id": "b1", "image_s3": "s3://bucket/path/img.png", "page": 1 }
-  ],
-  "document_id": "optional-doc-id"
-}
-```
-
-- Required fields:
-  - `outputUrls` (non-empty array)
-- Required header:
-  - `Authorization: Bearer <jwt>` (JWT `sub` is used as `userId`)
-- Optional header:
-  - `x-request-id` (if absent, server generates UUID)
-- Notes:
-  - Request `userId` in body is ignored/overwritten by JWT `sub`.
-  - Both `userInfo` and `user_info` are accepted.
-
-Output:
-
-- `202 application/json`
-
-```json
-{
-  "status": "accepted",
-  "requestId": "...",
-  "ok": true,
-  "insights": 32,
-  "documents": 2,
-  "chunks": 18,
-  "image_chunks": 0,
-  "summary": "...",
-  "errors": []
-}
-```
-
-- `400` if required fields are missing
-- `500` on internal errors (includes `requestId`)
-
-System diagram:
-
-```mermaid
-flowchart TD
-  C[Client] --> API[Express /generateInsights]
-  API --> SUM[SummarizeProject]
-  SUM --> SA[SummarizeAgent]
-  SA --> OAI1[OpenAI]
-  SUM --> DDB1[(DynamoDB persist summary root insight)]
-
-  API --> G[buildIngestionGraph]
-  G --> DL[DocumentLoader]
-  DL --> S3[(AWS S3 fetch for s3:// URLs)]
-  DL --> UST[Unstructured API parsing]
-  DL --> WEB[HTTP fetch for web URLs]
-
-  DL --> CH[ChunkingNode]
-  CH --> FE[FindingExtractionAgent]
-  FE --> OAI2[OpenAI]
-  FE --> FB[FindingBatchingAgent]
-  FB --> IE[InsightExtractionAgent]
-  IE --> OAI3[OpenAI]
-  IE --> CBM[CrossBatchMergeAgent]
-  CBM --> CR[CritiqueAgent]
-  CR --> DC[DeterministicCritiqueAgent]
-  CR --> SC[SemanticCritiqueAgent]
-  SC --> OAI4[OpenAI]
-  CR --> RV[ReviseAgent]
-  RV --> SRP[SemanticRevisionPlanner]
-  SRP --> OAI5[OpenAI]
-  RV --> RA[RevisionApplier]
-  RV --> VA[ValidateAgent]
-  VA --> MC[MetadataConsolidationAgent]
-  MC --> HF[HierarchyFinalizeAgent (deterministic)]
-  HF --> PERSIST[PersistenceNode]
-  PERSIST --> DDB2[(DynamoDB persist finalized insights)]
-
-  DDB2 --> API
-  API --> C
-```
-
-### Generate-insights agents and nodes
-
-| Node / Agent | What it does | Why it is needed |
-|---|---|---|
-| `SummarizeProject` + `SummarizeAgent` | Generates a project/context summary and persists it as a root insight before document ingestion. | Gives each run a project-level anchor (`projectId`) and shared context for downstream hierarchy attachment. |
-| `DocumentLoader` | Loads source content from S3/HTTP and parses documents (including PDF parsing flow). | Normalizes heterogeneous sources into a consistent document payload. |
-| `ChunkingNode` | Splits loaded documents into structured chunks. | Creates manageable evidence units for extraction and traceability. |
-| `FindingExtractionAgent` | Uses LLM extraction over chunks to produce concrete findings with evidence references. | Establishes a grounded evidence layer before higher-level insight synthesis. |
-| `FindingBatchingAgent` | Groups findings into bounded batches. | Controls token/latency/cost and improves extraction stability for insight generation. |
-| `InsightExtractionAgent` | Produces insights (and local parent-child links) from finding batches. | Converts raw findings into reusable insight objects with supporting evidence. |
-| `CrossBatchMergeAgent` | Deterministically deduplicates/merges near-duplicate insights across batches and remaps parent refs. | Prevents fragmented duplicate insights caused by batch boundaries. |
-| `CritiqueAgent` | Orchestrates critique pass by combining deterministic and semantic critique signals. | Central quality gate before revision. |
-| `DeterministicCritiqueAgent` | Applies rule-based checks (missing support, hierarchy issues, metadata issues). | Fast, predictable validation for objective defects. |
-| `SemanticCritiqueAgent` | Uses LLM critique for nuanced semantic weaknesses not captured by rules. | Catches subtle quality issues that require language understanding. |
-| `ReviseAgent` | Orchestrates revision planning + deterministic application of revisions. | Converts critique into actionable changes while preserving control. |
-| `SemanticRevisionPlanner` | Uses LLM to propose structured revision actions. | Produces targeted fixes for semantic issues in a machine-readable plan. |
-| `RevisionApplier` | Deterministically applies revision actions, resolves merges/removals, and enforces hierarchy integrity. | Ensures revision execution is safe, reproducible, and schema-consistent. |
-| `ValidateAgent` | Final validation pass for support, metadata normalization, and parent-reference sanity. | Filters/normalizes remaining invalid insights before persistence. |
-| `MetadataConsolidationAgent` | Consolidates/deduplicates metadata entries per insight. | Produces stable metadata shape for querying and downstream usage. |
-| `HierarchyFinalizeAgent` | Deterministic hierarchy cleanup only: remove dangling/self/cyclic parent links and normalize roots. No LLM calls. | Final structural integrity pass immediately before persistence. |
-| `PersistenceNode` | Persists finalized insights to DynamoDB. | Commits pipeline output as the system of record. |
-
----
 ## `POST /generate-insights-v2`
 
 Description: Runs the v2 findings-first pipeline for mixed-source documents (PDF, report-style docs with tables, XLSX/CSV-like tabular data) and returns evidence-grounded structured output.
@@ -550,8 +424,7 @@ flowchart LR
 ---
 ## Pending TODOs
 
-- `src/common/services/dynamo.ts`: TODO get rid of `Scan` usage.
-- `src/generate-insights/handler.ts`: TODO persist `summary.additional_refs.pendingInsightsNum`.
+- `src/common/services/dynamo.ts`: fixed-index query paths (`insight_id` PK and GSIs `GSI_UserId`/`GSI_DocumentId`/`GSI_ParentInsightId`/`GSI_Status`) with a project-delete scan fallback.
 - `src/generate-insights/agents/semanticRevisionPlanner.ts`: TODO reassess deletion policy; `remove` actions are currently downgraded and retained.
 - `src/generate-insights/agents/revisionApplier.ts`: TODO reassess deletion policy; suspected hallucinations are currently retained with lowered confidence.
 - `src/index.ts`: TODO marker for existing ref-handling cleanup.
@@ -561,13 +434,13 @@ flowchart LR
 ## Quick Example Request
 
 ```bash
-curl -X POST http://localhost:8000/generateInsights \
+curl -X POST http://localhost:8000/generate-insights-v2 \
   -H "authorization: Bearer <jwt-with-sub>" \
   -H "content-type: application/json" \
   -H "x-request-id: local" \
   -d '{
-    "outputUrls": ["https://example.com/report.pdf"],
-    "contextUrls": ["https://example.com/overview.pdf"],
+    "outputUrls": ["s3://bucket/report.pdf"],
+    "contextUrls": ["s3://bucket/overview.pdf"],
     "researchContext": "Optional project summary"
   }'
 ```

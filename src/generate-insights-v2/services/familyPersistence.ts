@@ -370,9 +370,13 @@ export async function deleteSearchableInsightFamily(insightId: string): Promise<
 export async function syncSearchableInsightFamilies(
   input: SyncSearchableInsightFamiliesInput,
 ): Promise<SyncSearchableInsightFamiliesResult> {
-  const filters = input.userId
-    ? { s3_node: input.scopeS3Node, user_id: input.userId }
-    : { s3_node: input.scopeS3Node };
+  if (!input.userId) {
+    throw new Error(
+      "syncSearchableInsightFamilies requires userId. Current fixed query path uses user_id index GSI_UserId.",
+    );
+  }
+
+  const filters = { s3_node: input.scopeS3Node, user_id: input.userId };
 
   const existing = await listInsights(filters);
   const existingById = new Map(existing.map((insight) => [insight.insight_id, insight]));

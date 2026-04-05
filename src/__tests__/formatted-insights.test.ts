@@ -6,14 +6,13 @@ process.env.NODE_ENV = "test";
 
 const listInsightsMock = vi.fn();
 
-vi.mock("../generate-insights/services/dynamo", () => ({
-  deleteAllInsights: vi.fn(),
+vi.mock("../common/services/dynamo", () => ({
+  deleteAllInsightsWithInsightIds: vi.fn(),
+  deleteInsightsByProjectId: vi.fn(),
+  getInsightById: vi.fn(),
   listInsights: listInsightsMock,
   persistInsights: vi.fn(),
-}));
-
-vi.mock("../generate-insights/handler", () => ({
-  handler: vi.fn(),
+  updateInsight: vi.fn(),
 }));
 
 import { app } from "../index";

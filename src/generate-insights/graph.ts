@@ -11,8 +11,6 @@ import type {
   UserInfo,
 } from "../types";
 import { assertConfig } from "../common/services/config";
-import { documentLoaderNode } from "./agents/documentLoader";
-import { chunkingNode } from "./agents/chunkingNode";
 import { insightExtractionAgent } from "./agents/insightExtractionAgent";
 import { hierarchyFinalizeAgent } from "./agents/hierarchyFinalizeAgent";
 import { critiqueAgent } from "./agents/critiqueAgent";
@@ -36,36 +34,6 @@ const mergeRecord = (left: Record<string, string>, right: Record<string, string>
 });
 
 const mergeIssues = (left: CritiqueMap, right: CritiqueMap) => mergeCritiqueMaps(left, right);
-
-const mergeInsights = (left: Insight[], right: Insight[]) => {
-  if (left.length === 0) return right;
-  if (right.length === 0) return left;
-  const byId = new Map<string, Insight>();
-  const order: string[] = [];
-
-  for (const insight of left) {
-    byId.set(insight.insight_id, insight);
-    order.push(insight.insight_id);
-  }
-
-  for (const insight of right) {
-    const existing = byId.get(insight.insight_id);
-    if (!existing) {
-      byId.set(insight.insight_id, insight);
-      order.push(insight.insight_id);
-      continue;
-    }
-    byId.set(insight.insight_id, {
-      ...existing,
-      ...insight,
-      supporting_chunks: insight.supporting_chunks ?? existing.supporting_chunks,
-      metadata: insight.metadata ?? existing.metadata,
-      parent_insight_id: insight.parent_insight_id ?? existing.parent_insight_id,
-    });
-  }
-
-  return order.map((id) => byId.get(id)!).filter(Boolean);
-};
 
 const GraphStateAnnotation = Annotation.Root({
   outputUrls: Annotation<string[]>({ value: mergeArray, default: () => [] }),
@@ -100,36 +68,9 @@ const GraphStateAnnotation = Annotation.Root({
 
 
 
-export function buildIngestionGraph(options?: { skipDocumentAndChunking?: boolean }) {
-  const skipDocumentAndChunking = options?.skipDocumentAndChunking ?? false;
-
-  if (skipDocumentAndChunking) {
-    return new StateGraph(GraphStateAnnotation)
-      // Findings layer removed: extraction now starts directly from chunks.
-      .addNode("InsightExtractionAgent", insightExtractionAgent)
-      .addNode("CritiqueAgent", (state) => critiqueAgent.process(state))
-      .addNode("ReviseAgent", (state) => reviseAgent.process(state))
-      .addNode("ValidateAgent", (state) => validateAgent.process(state))
-      .addNode("MetadataConsolidationAgent", (state) =>
-        metadataConsolidationAgent.process(state),
-      )
-      .addNode("HierarchyFinalizeAgent", (state) => hierarchyFinalizeAgent.process(state))
-      .addNode("PersistenceNode", persistenceNode)
-      .addEdge(START, "InsightExtractionAgent")
-      .addEdge("InsightExtractionAgent", "CritiqueAgent")
-      .addEdge("CritiqueAgent", "ReviseAgent")
-      .addEdge("ReviseAgent", "ValidateAgent")
-      .addEdge("ValidateAgent", "MetadataConsolidationAgent")
-      .addEdge("MetadataConsolidationAgent", "HierarchyFinalizeAgent")
-      .addEdge("HierarchyFinalizeAgent", "PersistenceNode")
-      .addEdge("PersistenceNode", END)
-      .compile();
-  }
-
+export function buildIngestionGraph() {
   return new StateGraph(GraphStateAnnotation)
-    .addNode("DocumentLoader", documentLoaderNode)
-    .addNode("ChunkingNode", chunkingNode)
-    // Findings layer removed: InsightExtractionAgent handles internal chunk grouping.
+    // Findings layer removed: extraction now starts directly from chunks.
     .addNode("InsightExtractionAgent", insightExtractionAgent)
     .addNode("CritiqueAgent", (state) => critiqueAgent.process(state))
     .addNode("ReviseAgent", (state) => reviseAgent.process(state))
@@ -139,9 +80,7 @@ export function buildIngestionGraph(options?: { skipDocumentAndChunking?: boolea
     )
     .addNode("HierarchyFinalizeAgent", (state) => hierarchyFinalizeAgent.process(state))
     .addNode("PersistenceNode", persistenceNode)
-    .addEdge(START, "DocumentLoader")
-    .addEdge("DocumentLoader", "ChunkingNode")
-    .addEdge("ChunkingNode", "InsightExtractionAgent")
+    .addEdge(START, "InsightExtractionAgent")
     .addEdge("InsightExtractionAgent", "CritiqueAgent")
     .addEdge("CritiqueAgent", "ReviseAgent")
     .addEdge("ReviseAgent", "ValidateAgent")
@@ -221,26 +160,6 @@ export async function summarizeProject(
   return { summary, insight_id: insightId };
 }
 
-export async function runIngestionPipeline(
-  outputUrls: string[],
-  imageBlocks: ImageBlock[] = [],
-  imageDocumentId?: string,
-  userId?: string,
-  userInfo?: UserInfo,
-  projectId?: string,
-): Promise<GraphState> {
-  assertConfig();
-  const graph = buildIngestionGraph();
-  return graph.invoke({
-    outputUrls,
-    imageBlocks,
-    imageDocumentId: imageDocumentId ?? undefined,
-    userId: userId ?? undefined,
-    userInfo: userInfo ?? undefined,
-    projectId: projectId ?? undefined,
-  });
-}
-
 export async function runIngestionPipelineFromChunks(
   chunks: Chunk[],
   userId?: string,
@@ -248,7 +167,7 @@ export async function runIngestionPipelineFromChunks(
   projectId?: string,
 ): Promise<GraphState> {
   assertConfig();
-  const graph = buildIngestionGraph({ skipDocumentAndChunking: true });
+  const graph = buildIngestionGraph();
   const sourceTextByS3Node = chunks.reduce<Record<string, string>>((acc, chunk) => {
     acc[chunk.s3_node] = chunk.content;
     return acc;

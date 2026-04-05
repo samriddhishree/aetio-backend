@@ -1,9 +1,9 @@
 import type { WriteRequest } from "@aws-sdk/client-dynamodb";
-import { DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   BatchWriteCommand,
-  DeleteCommand,
   DynamoDBDocumentClient,
+  QueryCommand,
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -23,6 +23,10 @@ const docClient = DynamoDBDocumentClient.from(client, {
 
 const MAX_BATCH = 25;
 const MAX_RETRIES = 5;
+const INSIGHTS_BY_USER_ID_INDEX = "GSI_UserId";
+const INSIGHTS_BY_DOCUMENT_ID_INDEX = "GSI_DocumentId";
+const INSIGHTS_BY_PARENT_INSIGHT_ID_INDEX = "GSI_ParentInsightId";
+const INSIGHTS_BY_STATUS_INDEX = "GSI_Status";
 
 export type InsightFilterKey =
   | "insight_id"
@@ -36,6 +40,30 @@ export type InsightFilterKey =
   | "document_id";
 
 export type InsightFilters = Partial<Record<InsightFilterKey, string | string[] | null>>;
+
+type QueryTarget = {
+  partitionKey: "insight_id" | "user_id" | "document_id" | "parent_insight_id" | "status";
+  indexName?: string;
+};
+
+const QUERY_PRIORITY: QueryTarget["partitionKey"][] = [
+  "insight_id",
+  "user_id",
+  "document_id",
+  "parent_insight_id",
+  "status",
+];
+
+const QUERY_TARGETS: Record<QueryTarget["partitionKey"], QueryTarget> = {
+  insight_id: { partitionKey: "insight_id" },
+  user_id: { partitionKey: "user_id", indexName: INSIGHTS_BY_USER_ID_INDEX },
+  document_id: { partitionKey: "document_id", indexName: INSIGHTS_BY_DOCUMENT_ID_INDEX },
+  parent_insight_id: {
+    partitionKey: "parent_insight_id",
+    indexName: INSIGHTS_BY_PARENT_INSIGHT_ID_INDEX,
+  },
+  status: { partitionKey: "status", indexName: INSIGHTS_BY_STATUS_INDEX },
+};
 
 export async function persistInsights(insights: Insight[]): Promise<void> {
   console.debug("dynamo:persist:start", { count: insights.length });
@@ -67,11 +95,10 @@ export async function persistInsights(insights: Insight[]): Promise<void> {
     }
 
     if (unprocessed.length > 0) {
-      throw new Error(
-        `Failed to persist ${unprocessed.length} insights after retries.`,
-      );
+      throw new Error(`Failed to persist ${unprocessed.length} insights after retries.`);
     }
   }
+
   console.debug("dynamo:persist:done", { count: insights.length });
 }
 
@@ -79,8 +106,11 @@ export async function updateInsight(insight: Insight): Promise<void> {
   if (!insight.insight_id) {
     throw new Error("updateInsight requires insight.insight_id");
   }
+  if (!insight.user_id) {
+    throw new Error("updateInsight requires insight.user_id for composite key updates");
+  }
 
-  const { insight_id: insightId, ...rest } = insight;
+  const { insight_id: insightId, user_id: userId, ...rest } = insight;
   const updatableEntries = Object.entries(rest).filter(([, value]) => value !== undefined);
 
   if (updatableEntries.length === 0) {
@@ -114,11 +144,11 @@ export async function updateInsight(insight: Insight): Promise<void> {
     await docClient.send(
       new UpdateCommand({
         TableName: config.ddbTableName,
-        Key: { insight_id: insightId },
+        Key: { insight_id: insightId, user_id: userId },
         UpdateExpression: `SET ${setExpressions.join(", ")}`,
         ExpressionAttributeNames: expressionAttributeNames,
         ExpressionAttributeValues: expressionAttributeValues,
-        ConditionExpression: "attribute_exists(insight_id)",
+        ConditionExpression: "attribute_exists(insight_id) AND attribute_exists(user_id)",
       }),
     );
 
@@ -154,73 +184,55 @@ export async function deleteInsightById(insightId: string): Promise<void> {
   }
 
   console.debug("dynamo:deleteInsightById:start", { insightId });
-  await docClient.send(
-    new DeleteCommand({
-      TableName: config.ddbTableName,
-      Key: { insight_id: insightId },
-    }),
-  );
+  const keys = await queryInsightKeysByInsightId(insightId);
+  await batchDeleteByKeys(keys);
   console.debug("dynamo:deleteInsightById:done", { insightId });
 }
-// TODO: Get rid of Scan
+
 export async function listInsights(filters: InsightFilters = {}): Promise<Insight[]> {
-  const filterEntries = Object.entries(filters).filter(([, value]) => value !== undefined);
-  const names: Record<string, string> = {};
-  const values: Record<string, unknown> = {};
-  const conditions: string[] = [];
+  const filterEntries = Object.entries(filters).filter(([, value]) => value !== undefined) as Array<
+    [InsightFilterKey, string | string[] | null]
+  >;
 
-  for (const [key, value] of filterEntries) {
-    const nameKey = `#${key}`;
-    names[nameKey] = key;
-
-    if (value === null) {
-      conditions.push(`attribute_not_exists(${nameKey})`);
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      const orParts: string[] = [];
-      value.forEach((entry, index) => {
-        const valueKey = `:${key}_${index}`;
-        values[valueKey] = entry;
-        orParts.push(`${nameKey} = ${valueKey}`);
-      });
-      if (orParts.length > 0) {
-        conditions.push(`(${orParts.join(" OR ")})`);
-      }
-      continue;
-    }
-
-    const valueKey = `:${key}`;
-    values[valueKey] = value;
-    conditions.push(`${nameKey} = ${valueKey}`);
+  if (filterEntries.length === 0) {
+    throw new Error(
+      "listInsights requires at least one indexed filter.",
+    );
   }
 
-  let lastEvaluatedKey: Record<string, unknown> | undefined;
-
-  const items: Insight[] = [];
-  console.log("constraints", conditions);
-  do {
-    const response = await docClient.send(
-      new ScanCommand({
-        TableName: config.ddbTableName,
-        ...(conditions.length > 0
-          ? {
-              FilterExpression: conditions.join(" AND "),
-              ExpressionAttributeNames: names,
-              ExpressionAttributeValues: values,
-            }
-          : {}),
-        ExclusiveStartKey: lastEvaluatedKey,
-      })
+  const selectedKey = chooseBestQueryKey(filters);
+  if (!selectedKey) {
+    throw new Error(
+      `No indexed partition key in requested filters [${filterEntries
+        .map(([key]) => key)
+        .join(", ")}]. Supported partition keys: insight_id (table PK), user_id (GSI_UserId), document_id (GSI_DocumentId), parent_insight_id (GSI_ParentInsightId), status (GSI_Status).`,
     );
+  }
 
-    items.push(...((response.Items ?? []) as Insight[]));
-    lastEvaluatedKey = response.LastEvaluatedKey;
-  } while (lastEvaluatedKey);
+  const keyValues = normalizeFilterValues(filters[selectedKey]);
+  if (keyValues.length === 0) {
+    return [];
+  }
 
-  console.log("listInsights:done", items, items.length);
-  return items;
+  const queryTarget = QUERY_TARGETS[selectedKey];
+
+  const dedupedById = new Map<string, Insight>();
+
+  for (const keyValue of keyValues) {
+    const pageItems = await queryItemsByPartitionKey({
+      tableName: config.ddbTableName,
+      target: queryTarget,
+      partitionValue: keyValue,
+      filters,
+    });
+
+    for (const item of pageItems) {
+      if (!item.insight_id) continue;
+      dedupedById.set(`${item.insight_id}::${item.user_id ?? ""}`, item);
+    }
+  }
+
+  return Array.from(dedupedById.values());
 }
 
 export async function deleteAllInsights(): Promise<number> {
@@ -232,203 +244,240 @@ export async function deleteAllInsightsWithInsightIds(): Promise<{
   deletedCount: number;
   insightIds: string[];
 }> {
-  const describe = await client.send(
-    new DescribeTableCommand({ TableName: config.ddbTableName }),
+  throw new Error(
+    "deleteAllInsightsWithInsightIds is disabled without a dedicated indexed partition strategy.",
   );
-  const keyAttributes =
-    describe.Table?.KeySchema?.map((entry) => entry.AttributeName).filter(
-      (value): value is string => Boolean(value),
-    ) ?? [];
-
-  if (keyAttributes.length === 0) {
-    throw new Error("Could not resolve table key schema.");
-  }
-
-  const expressionAttributeNames = keyAttributes.reduce<Record<string, string>>(
-    (acc, key, index) => {
-      acc[`#k${index}`] = key;
-      return acc;
-    },
-    {},
-  );
-  const projectionTokens = Object.keys(expressionAttributeNames);
-  if (!keyAttributes.includes("insight_id")) {
-    expressionAttributeNames["#insight_id"] = "insight_id";
-    projectionTokens.push("#insight_id");
-  }
-  const projectionExpression = projectionTokens.join(", ");
-
-  let deletedCount = 0;
-  let ExclusiveStartKey: Record<string, unknown> | undefined;
-  const insightIds = new Set<string>();
-
-  do {
-    const response = await docClient.send(
-      new ScanCommand({
-        TableName: config.ddbTableName,
-        ProjectionExpression: projectionExpression,
-        ExpressionAttributeNames: expressionAttributeNames,
-        ExclusiveStartKey,
-      }),
-    );
-
-    for (const item of response.Items ?? []) {
-      const insightId = item.insight_id;
-      if (typeof insightId === "string" && insightId.trim().length > 0) {
-        insightIds.add(insightId);
-      }
-    }
-
-    const keys = (response.Items ?? [])
-      .map((item) => {
-        const keyObject = keyAttributes.reduce<Record<string, unknown>>((acc, key) => {
-          if (item[key] !== undefined) {
-            acc[key] = item[key];
-          }
-          return acc;
-        }, {});
-        return Object.keys(keyObject).length === keyAttributes.length ? keyObject : null;
-      })
-      .filter((item): item is Record<string, unknown> => item !== null);
-
-    if (keys.length > 0) {
-      const deleteRequests = keys.map((key) => ({
-        DeleteRequest: { Key: key },
-      })) as unknown as WriteRequest[];
-
-      const batches = chunkArray(deleteRequests, MAX_BATCH);
-      for (const batch of batches) {
-        let unprocessed = batch;
-
-        for (let attempt = 0; attempt <= MAX_RETRIES && unprocessed.length > 0; attempt += 1) {
-          const writeResponse = await docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [config.ddbTableName]: unprocessed,
-              },
-            }),
-          );
-
-          const remaining = writeResponse.UnprocessedItems?.[config.ddbTableName];
-          unprocessed = (remaining ? Array.from(remaining) : []) as WriteRequest[];
-
-          if (unprocessed.length > 0) {
-            const backoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);
-            await sleep(backoffMs);
-          }
-        }
-
-        if (unprocessed.length > 0) {
-          throw new Error(
-            `Failed to delete ${unprocessed.length} records after retries.`,
-          );
-        }
-      }
-
-      deletedCount += deleteRequests.length;
-    }
-
-    ExclusiveStartKey = response.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-
-  return { deletedCount, insightIds: Array.from(insightIds) };
 }
 
 export async function deleteInsightsByProjectId(projectId: string): Promise<number> {
   if (!projectId) return 0;
 
-  const describe = await client.send(
-    new DescribeTableCommand({ TableName: config.ddbTableName }),
-  );
-  const keyAttributes =
-    describe.Table?.KeySchema?.map((entry) => entry.AttributeName).filter(
-      (value): value is string => Boolean(value),
-    ) ?? [];
+  const keys = await scanInsightKeysForProject(projectId);
+  await batchDeleteByKeys(keys);
+  return keys.length;
+}
 
-  if (keyAttributes.length === 0) {
-    throw new Error("Could not resolve table key schema.");
+function chooseBestQueryKey(
+  filters: InsightFilters,
+): QueryTarget["partitionKey"] | undefined {
+  for (const key of QUERY_PRIORITY) {
+    const rawValue = filters[key];
+    if (rawValue === undefined || rawValue === null) continue;
+    if (normalizeFilterValues(rawValue).length === 0) continue;
+    return key;
+  }
+  return undefined;
+}
+
+function normalizeFilterValues(value: string | string[] | null | undefined): string[] {
+  if (value === null || value === undefined) return [];
+  if (Array.isArray(value)) return Array.from(new Set(value));
+  return [value];
+}
+
+function buildFilterExpression(
+  filters: InsightFilters,
+  keyAttribute: QueryTarget["partitionKey"],
+): {
+  conditions: string[];
+  expressionAttributeNames: Record<string, string>;
+  expressionAttributeValues: Record<string, unknown>;
+} {
+  const conditions: string[] = [];
+  const expressionAttributeNames: Record<string, string> = {};
+  const expressionAttributeValues: Record<string, unknown> = {};
+  let fieldIndex = 0;
+
+  for (const [rawKey, rawValue] of Object.entries(filters) as Array<
+    [InsightFilterKey, string | string[] | null | undefined]
+  >) {
+    if (rawValue === undefined || rawKey === keyAttribute) continue;
+
+    const nameKey = `#f${fieldIndex}`;
+    fieldIndex += 1;
+    expressionAttributeNames[nameKey] = rawKey;
+
+    if (rawValue === null) {
+      conditions.push(`attribute_not_exists(${nameKey})`);
+      continue;
+    }
+
+    if (Array.isArray(rawValue)) {
+      if (rawValue.length === 0) continue;
+
+      const orParts: string[] = [];
+      rawValue.forEach((entry, valueIndex) => {
+        const valueKey = `:f${fieldIndex}_${valueIndex}`;
+        expressionAttributeValues[valueKey] = entry;
+        orParts.push(`${nameKey} = ${valueKey}`);
+      });
+
+      if (orParts.length > 0) {
+        conditions.push(`(${orParts.join(" OR ")})`);
+      }
+      continue;
+    }
+
+    const valueKey = `:f${fieldIndex}`;
+    expressionAttributeValues[valueKey] = rawValue;
+    conditions.push(`${nameKey} = ${valueKey}`);
   }
 
-  const expressionAttributeNames = keyAttributes.reduce<Record<string, string>>(
-    (acc, key, index) => {
-      acc[`#k${index}`] = key;
-      return acc;
-    },
-    {
-      "#project_id": "project_id",
-      "#insight_id": "insight_id",
-    },
-  );
-  const projectionExpression = keyAttributes.map((_, index) => `#k${index}`).join(", ");
+  return {
+    conditions,
+    expressionAttributeNames,
+    expressionAttributeValues,
+  };
+}
 
-  let deletedCount = 0;
-  let ExclusiveStartKey: Record<string, unknown> | undefined;
+async function queryItemsByPartitionKey(params: {
+  tableName: string;
+  target: QueryTarget;
+  partitionValue: string;
+  filters?: InsightFilters;
+}): Promise<Insight[]> {
+  const filterResult = params.filters
+    ? buildFilterExpression(params.filters, params.target.partitionKey)
+    : {
+        conditions: [],
+        expressionAttributeNames: {},
+        expressionAttributeValues: {},
+      };
+
+  const expressionAttributeNames: Record<string, string> = {
+    "#pk": params.target.partitionKey,
+    ...filterResult.expressionAttributeNames,
+  };
+  const expressionAttributeValues: Record<string, unknown> = {
+    ":pk": params.partitionValue,
+    ...filterResult.expressionAttributeValues,
+  };
+
+  const items: Insight[] = [];
+  let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+  do {
+    const response = await docClient.send(
+      new QueryCommand({
+        TableName: params.tableName,
+        ...(params.target.indexName ? { IndexName: params.target.indexName } : {}),
+        KeyConditionExpression: "#pk = :pk",
+        ...(filterResult.conditions.length > 0
+          ? {
+              FilterExpression: filterResult.conditions.join(" AND "),
+            }
+          : {}),
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ExclusiveStartKey: lastEvaluatedKey,
+      }),
+    );
+
+    items.push(...((response.Items ?? []) as Insight[]));
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastEvaluatedKey);
+
+  return items;
+}
+
+async function queryInsightKeysByInsightId(
+  insightId: string,
+): Promise<Array<{ insight_id: string; user_id: string }>> {
+  const items = await queryItemsByPartitionKey({
+    tableName: config.ddbTableName,
+    target: { partitionKey: "insight_id" },
+    partitionValue: insightId,
+  });
+
+  const keys = new Map<string, { insight_id: string; user_id: string }>();
+  for (const item of items) {
+    if (typeof item.insight_id !== "string" || typeof item.user_id !== "string") continue;
+    keys.set(`${item.insight_id}::${item.user_id}`, {
+      insight_id: item.insight_id,
+      user_id: item.user_id,
+    });
+  }
+
+  return Array.from(keys.values());
+}
+
+async function scanInsightKeysForProject(
+  projectId: string,
+): Promise<Array<{ insight_id: string; user_id: string }>> {
+  const keys = new Map<string, { insight_id: string; user_id: string }>();
+  let lastEvaluatedKey: Record<string, unknown> | undefined;
 
   do {
     const response = await docClient.send(
       new ScanCommand({
         TableName: config.ddbTableName,
-        ProjectionExpression: projectionExpression,
+        ProjectionExpression: "#insight_id, #user_id",
         FilterExpression: "#project_id = :projectId OR #insight_id = :projectId",
-        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeNames: {
+          "#project_id": "project_id",
+          "#insight_id": "insight_id",
+          "#user_id": "user_id",
+        },
         ExpressionAttributeValues: {
           ":projectId": projectId,
         },
-        ExclusiveStartKey,
+        ExclusiveStartKey: lastEvaluatedKey,
       }),
     );
 
-    const keys = (response.Items ?? [])
-      .map((item) => {
-        const keyObject = keyAttributes.reduce<Record<string, unknown>>((acc, key) => {
-          if (item[key] !== undefined) {
-            acc[key] = item[key];
-          }
-          return acc;
-        }, {});
-        return Object.keys(keyObject).length === keyAttributes.length ? keyObject : null;
-      })
-      .filter((item): item is Record<string, unknown> => item !== null);
-
-    if (keys.length > 0) {
-      const deleteRequests = keys.map((key) => ({
-        DeleteRequest: { Key: key },
-      })) as unknown as WriteRequest[];
-
-      const batches = chunkArray(deleteRequests, MAX_BATCH);
-      for (const batch of batches) {
-        let unprocessed = batch;
-
-        for (let attempt = 0; attempt <= MAX_RETRIES && unprocessed.length > 0; attempt += 1) {
-          const writeResponse = await docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [config.ddbTableName]: unprocessed,
-              },
-            }),
-          );
-
-          const remaining = writeResponse.UnprocessedItems?.[config.ddbTableName];
-          unprocessed = (remaining ? Array.from(remaining) : []) as WriteRequest[];
-
-          if (unprocessed.length > 0) {
-            const backoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);
-            await sleep(backoffMs);
-          }
-        }
-
-        if (unprocessed.length > 0) {
-          throw new Error(
-            `Failed to delete ${unprocessed.length} project records after retries.`,
-          );
-        }
+    for (const item of response.Items ?? []) {
+      const insightId = item.insight_id;
+      const userId = item.user_id;
+      if (
+        typeof insightId === "string" &&
+        insightId.trim().length > 0 &&
+        typeof userId === "string" &&
+        userId.trim().length > 0
+      ) {
+        keys.set(`${insightId}::${userId}`, {
+          insight_id: insightId,
+          user_id: userId,
+        });
       }
-
-      deletedCount += deleteRequests.length;
     }
 
-    ExclusiveStartKey = response.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastEvaluatedKey);
 
-  return deletedCount;
+  return Array.from(keys.values());
+}
+
+async function batchDeleteByKeys(keys: Array<{ insight_id: string; user_id: string }>): Promise<void> {
+  if (keys.length === 0) return;
+
+  const deleteRequests = keys.map((key) => ({
+    DeleteRequest: { Key: key },
+  })) as unknown as WriteRequest[];
+
+  const batches = chunkArray(deleteRequests, MAX_BATCH);
+  for (const batch of batches) {
+    let unprocessed = batch;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES && unprocessed.length > 0; attempt += 1) {
+      const writeResponse = await docClient.send(
+        new BatchWriteCommand({
+          RequestItems: {
+            [config.ddbTableName]: unprocessed,
+          },
+        }),
+      );
+
+      const remaining = writeResponse.UnprocessedItems?.[config.ddbTableName];
+      unprocessed = (remaining ? Array.from(remaining) : []) as WriteRequest[];
+
+      if (unprocessed.length > 0) {
+        const backoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);
+        await sleep(backoffMs);
+      }
+    }
+
+    if (unprocessed.length > 0) {
+      throw new Error(`Failed to delete ${unprocessed.length} records after retries.`);
+    }
+  }
 }

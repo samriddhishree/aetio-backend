@@ -1,10 +1,9 @@
 import {
   deleteInsightFamilyData as deleteInsightFamilyDataRow,
-  listInsightFamilyData as listInsightFamilyDataRows,
+  getInsightFamilyData as getInsightFamilyDataRow,
   putInsightFamilyData as putInsightFamilyDataRow,
   type PersistedInsightFamilyData,
 } from "../../common/services/insightFamilyDataTable";
-import { deleteInsightById, listInsights } from "../../common/services/dynamo";
 import { config } from "../../common/services/config";
 import type { InsightFamilyData } from "../types";
 
@@ -111,57 +110,9 @@ export async function deleteInsightFamilyData(tableId: string): Promise<void> {
   await deleteInsightFamilyDataRow(tableId);
 }
 
-async function cleanupLegacyInsightFamilyDataRows(input: {
-  scopeS3Node: string;
-  userId?: string;
-}): Promise<void> {
-  try {
-    const legacyRows = await listInsights(
-      input.userId
-        ? {
-            s3_node: input.scopeS3Node,
-            user_id: input.userId,
-            object_type: config.insightFamilyDataType,
-          }
-        : {
-            s3_node: input.scopeS3Node,
-            object_type: config.insightFamilyDataType,
-          },
-    );
-
-    for (const row of legacyRows) {
-      await deleteInsightById(row.insight_id);
-    }
-
-    if (legacyRows.length > 0) {
-      console.info("[insightfamilydata] cleaned up legacy insight rows", {
-        count: legacyRows.length,
-        scopeS3Node: input.scopeS3Node,
-      });
-    }
-  } catch (error) {
-    console.warn("[insightfamilydata] legacy insight-row cleanup failed", {
-      scopeS3Node: input.scopeS3Node,
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
-}
-
 export async function syncInsightFamilyData(
   input: SyncInsightFamilyDataInput,
 ): Promise<SyncInsightFamilyDataResult> {
-  const existing = await listInsightFamilyDataRows(
-    input.userId
-      ? {
-          s3_node: input.scopeS3Node,
-          user_id: input.userId,
-        }
-      : {
-          s3_node: input.scopeS3Node,
-        },
-  );
-
-  const existingById = new Map(existing.map((record) => [record.table_id, record]));
   const incomingRecords = input.insightFamilyData.map((table) =>
     buildPersistedInsightFamilyDataRecord({
       table,
@@ -178,10 +129,19 @@ export async function syncInsightFamilyData(
   const incomingById = new Map(
     incomingRecords.map((record) => [record.familyData.table_id, record]),
   );
+  const existingPairs = await Promise.all(
+    Array.from(incomingById.keys()).map(async (tableId) => [
+      tableId,
+      await getInsightFamilyDataRow(tableId),
+    ] as const),
+  );
+  const existingById = new Map<string, PersistedInsightFamilyData>(
+    existingPairs.filter((entry): entry is [string, PersistedInsightFamilyData] => Boolean(entry[1])),
+  );
 
   let created = 0;
   let updated = 0;
-  let deleted = 0;
+  const deleted = 0;
 
   for (const [tableId, record] of incomingById.entries()) {
     const existingRecord = existingById.get(tableId);
@@ -201,17 +161,6 @@ export async function syncInsightFamilyData(
     });
     updated += 1;
   }
-
-  for (const existingRecord of existing) {
-    if (incomingById.has(existingRecord.table_id)) continue;
-    await deleteInsightFamilyData(existingRecord.table_id);
-    deleted += 1;
-  }
-
-  await cleanupLegacyInsightFamilyDataRows({
-    scopeS3Node: input.scopeS3Node,
-    userId: input.userId,
-  });
 
   return { created, updated, deleted };
 }
