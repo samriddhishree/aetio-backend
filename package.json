@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "ts-node-dev --env-file=.env --respawn --transpile-only src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node -r dotenv/config dist/index.js",
+    "start": "npm i && npm run build && node -r dotenv/config dist/index.js",
     "test": "node -r dotenv/config ./node_modules/vitest/vitest.mjs run",
     "test:v2": "node -r dotenv/config scripts/generate-insights-v2-test.mjs",
     "test:family-persistence": "node -r dotenv/config scripts/familyPersistence.test.mjs",
