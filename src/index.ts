@@ -9,7 +9,7 @@ import { runIngestionPipelineFromChunks, summarizeProject } from "./generate-ins
 import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
   deleteAllInsightsWithInsightIds,
-  deleteInsightsByProjectId,
+  deleteInsightsByProjectIdWithInsightIds,
   getInsightById,
   listInsights,
   persistInsights,
@@ -17,6 +17,11 @@ import {
   type InsightFilters,
   type InsightFilterKey,
 } from "./common/services/dynamo";
+import {
+  getInsightFamilyData,
+  putInsightFamilyData,
+  type PersistedInsightFamilyData,
+} from "./common/services/insightFamilyDataTable";
 import { deleteInsightDocuments, upsertInsightDocument } from "./common/services/elasticsearch";
 import { toOpenSearchInsightDocument } from "./generate-insights-v2/services/familyPersistence";
 
@@ -128,6 +133,16 @@ const writeAcceptStreamEvent = (res: Response, event: AcceptStreamEvent): void =
   res.write(`${JSON.stringify(event)}\n`);
 };
 
+const upsertInsightToOpenSearch = async (insight: Insight): Promise<void> => {
+  await upsertInsightDocument(toOpenSearchInsightDocument(insight));
+};
+
+const upsertInsightsToOpenSearch = async (insights: Insight[]): Promise<void> => {
+  for (const insight of insights) {
+    await upsertInsightToOpenSearch(insight);
+  }
+};
+
 const toInsightFromStreamLine = (line: string): Insight => {
   let parsed: unknown;
   try {
@@ -157,13 +172,42 @@ const extractInsightUpdatePatch = (body: unknown): Partial<Insight> => {
   const patch: Partial<Insight> = {};
 
   if (typeof payload.text === "string") patch.text = payload.text;
+  if (typeof payload.createdAt === "string") patch.createdAt = payload.createdAt;
   if (typeof payload.summary === "string") patch.summary = payload.summary;
   if (Array.isArray(payload.metadata)) patch.metadata = payload.metadata;
   if (typeof payload.status === "string") patch.status = payload.status;
   if ("additional_refs" in payload) patch.additional_refs = payload.additional_refs;
+  if ("user_info" in payload && payload.user_info && typeof payload.user_info === "object" && !Array.isArray(payload.user_info)) {
+    patch.user_info = payload.user_info;
+  }
   if (typeof payload.family_text === "string") patch.family_text = payload.family_text;
   if (typeof payload.question_answered === "string") patch.question_answered = payload.question_answered;
   if (typeof payload.evidence_snippet === "string") patch.evidence_snippet = payload.evidence_snippet;
+
+  return patch;
+};
+
+const extractInsightFamilyDataPatch = (
+  body: unknown,
+): Partial<Pick<PersistedInsightFamilyData, "dimensions" | "metric_columns" | "rows">> => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return {};
+  }
+
+  const payload = body as Partial<PersistedInsightFamilyData>;
+  const patch: Partial<Pick<PersistedInsightFamilyData, "dimensions" | "metric_columns" | "rows">> = {};
+
+  if (Array.isArray(payload.dimensions)) {
+    patch.dimensions = payload.dimensions.filter((value): value is string => typeof value === "string");
+  }
+
+  if (Array.isArray(payload.metric_columns)) {
+    patch.metric_columns = payload.metric_columns.filter((value): value is string => typeof value === "string");
+  }
+
+  if (Array.isArray(payload.rows)) {
+    patch.rows = payload.rows;
+  }
 
   return patch;
 };
@@ -393,6 +437,51 @@ app.patch(["/insight/:insightId", "/insights/:insightId"], async (req: Request, 
   }
 });
 
+app.patch("/insight-family-data/:tableId", async (req: Request, res: Response) => {
+  const tableId = req.params.tableId?.trim();
+  if (!tableId) {
+    return res.status(400).json({ error: "tableId is required in path" });
+  }
+
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const patch = extractInsightFamilyDataPatch(req.body);
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: "No editable insight family data fields provided in request body" });
+  }
+
+  try {
+    const existingData = await getInsightFamilyData(tableId);
+    if (!existingData) {
+      return res.status(404).json({ error: `Insight family data not found: ${tableId}` });
+    }
+
+    if (existingData.user_id && existingData.user_id !== jwtUserId) {
+      return res.status(403).json({ error: "Forbidden for requested tableId" });
+    }
+
+    const nextRows = patch.rows ?? existingData.rows;
+    const nextData: PersistedInsightFamilyData = {
+      ...existingData,
+      ...patch,
+      table_id: tableId,
+      family_id: existingData.family_id,
+      user_id: existingData.user_id ?? jwtUserId,
+      row_count: nextRows.length,
+      updated_at: new Date().toISOString(),
+    };
+
+    await putInsightFamilyData(nextData);
+    return res.status(200).json({ data: nextData });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
 app.delete("/insights/deleteAll", async (_req: Request, res: Response) => {
   try {
     const { deletedCount, insightIds } = await deleteAllInsightsWithInsightIds();
@@ -425,8 +514,25 @@ app.delete("/project/:projectId", async (req: Request, res: Response) => {
   }
 
   try {
-    const deleted = await deleteInsightsByProjectId(projectId);
-    return res.json({ deleted, projectId });
+    const { deletedCount, insightIds } = await deleteInsightsByProjectIdWithInsightIds(projectId);
+
+    try {
+      await deleteInsightDocuments(insightIds);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return res.status(500).json({
+        error: `Dynamo delete succeeded but OpenSearch delete failed: ${message}`,
+        deleted: deletedCount,
+        attemptedOpenSearchDeletes: insightIds.length,
+        projectId,
+      });
+    }
+
+    return res.json({
+      deleted: deletedCount,
+      deletedFromOpenSearch: insightIds.length,
+      projectId,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
@@ -473,6 +579,7 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
             projectInsightFromPayload = normalizedInsight;
           } else {
             await persistInsights([normalizedInsight]);
+            await upsertInsightToOpenSearch(normalizedInsight);
             persistedCount += 1;
             writeAcceptStreamEvent(res, {
               type: "insight_persisted",
@@ -495,6 +602,7 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
           projectInsightFromPayload = normalizedInsight;
         } else {
           await persistInsights([normalizedInsight]);
+          await upsertInsightToOpenSearch(normalizedInsight);
           persistedCount += 1;
           writeAcceptStreamEvent(res, {
             type: "insight_persisted",
@@ -512,6 +620,7 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
           counts,
         );
         await persistInsights([projectInsight]);
+        await upsertInsightToOpenSearch(projectInsight);
         persistedCount += 1;
         writeAcceptStreamEvent(res, {
           type: "project_counts_updated",
@@ -557,6 +666,7 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
 
   try {
     await persistInsights(updatedInsights);
+    await upsertInsightsToOpenSearch(updatedInsights);
     return res.json({ updated: updatedInsights.length, items: updatedInsights });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

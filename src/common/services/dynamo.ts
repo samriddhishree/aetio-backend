@@ -250,11 +250,30 @@ export async function deleteAllInsightsWithInsightIds(): Promise<{
 }
 
 export async function deleteInsightsByProjectId(projectId: string): Promise<number> {
-  if (!projectId) return 0;
+  const { deletedCount } = await deleteInsightsByProjectIdWithInsightIds(projectId);
+  return deletedCount;
+}
+
+export async function deleteInsightsByProjectIdWithInsightIds(projectId: string): Promise<{
+  deletedCount: number;
+  insightIds: string[];
+}> {
+  if (!projectId) {
+    return {
+      deletedCount: 0,
+      insightIds: [],
+    };
+  }
 
   const keys = await scanInsightKeysForProject(projectId);
   await batchDeleteByKeys(keys);
-  return keys.length;
+  const insightIds = Array.from(
+    new Set(keys.map((key) => key.insight_id).filter((insightId) => insightId.trim().length > 0)),
+  );
+  return {
+    deletedCount: keys.length,
+    insightIds,
+  };
 }
 
 function chooseBestQueryKey(

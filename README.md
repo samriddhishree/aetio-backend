@@ -225,7 +225,11 @@ Output:
 - `200 application/json`
 
 ```json
-{ "deleted": 42, "projectId": "project-abc" }
+{
+  "deleted": 42,
+  "deletedFromOpenSearch": 42,
+  "projectId": "project-abc"
+}
 ```
 
 - `400` if `projectId` missing
@@ -237,7 +241,8 @@ System diagram:
 flowchart LR
   C[Client] --> API[Express /project/:projectId DELETE]
   API --> DDB[(DynamoDB scan by project_id/insight_id + batch delete)]
-  DDB --> API
+  DDB --> OS[(OpenSearch bulk delete by insight_id)]
+  OS --> API
   API --> C
 ```
 
@@ -306,8 +311,9 @@ System diagram:
 flowchart LR
   C[Client] --> API[Express /insights/accept/:projectId PATCH]
   API --> N[Status normalization + accepted/declined counts]
-  N --> DDB[(DynamoDB batch persistInsights)]
-  DDB --> API
+  N --> DDB[(DynamoDB persistInsights)]
+  DDB --> OS[(OpenSearch upsert per persisted insight)]
+  OS --> API
   API --> C
 ```
 
