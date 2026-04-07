@@ -7,6 +7,7 @@ type Config = {
   maxConcurrency: number;
   requestTimeoutMs: number;
   ddbTableName: string;
+  projectsTableName: string;
   insightFamilyDataTableName: string;
   insightFamilyDataType: string;
   insightFamilyDataScopeSuffix: string;
@@ -28,6 +29,7 @@ export const config: Config = {
   maxConcurrency: Number(process.env.PIPELINE_CONCURRENCY ?? "4"),
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS ?? "30000"),
   ddbTableName: process.env.DDB_TABLE_NAME ?? "insights",
+  projectsTableName: process.env.PROJECTS_TABLE_NAME ?? "projects",
   insightFamilyDataTableName:
     process.env.INSIGHT_FAMILY_DATA_TABLE_NAME ?? "insightfamilydata",
   insightFamilyDataType: process.env.INSIGHT_FAMILY_DATA_TYPE ?? "insightfamilydata",

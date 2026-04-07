@@ -14,6 +14,7 @@ import type { InsightFamily } from "../types";
 
 export type SearchInsightDocument = {
   insight_id: string;
+  text: string;
   family_text: string;
   question_answered: string;
   summary?: string;
@@ -32,6 +33,7 @@ export type SearchInsightDocument = {
   status?: string;
   created_at?: string;
   updated_at?: string;
+  expires_at?: string;
   searchable_text: string;
 };
 
@@ -76,6 +78,19 @@ function uniqueStrings(items: string[]): string[] {
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+function toIsoOrUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) return undefined;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+  return parsed.toISOString();
+}
+
+function addOneYearIso(baseIso: string): string {
+  const next = new Date(baseIso);
+  next.setUTCFullYear(next.getUTCFullYear() + 1);
+  return next.toISOString();
 }
 
 function buildSearchableText(input: {
@@ -127,6 +142,9 @@ export function buildFamilyPersistenceScope(input: {
 
 export function toOpenSearchInsightDocument(insight: Insight): SearchInsightDocument {
   const refs = asRecord(insight.additional_refs);
+  const createdAt = toIsoOrUndefined(insight.created_at) ?? toIsoOrUndefined(insight.createdAt);
+  const updatedAt = toIsoOrUndefined(insight.updated_at) ?? toIsoOrUndefined(insight.updatedAt);
+  const expiresAt = toIsoOrUndefined(insight.expires_at) ?? toIsoOrUndefined(insight.expiresAt);
   const familyText =
     typeof insight.family_text === "string" && insight.family_text.trim().length > 0
       ? compact(insight.family_text)
@@ -208,6 +226,7 @@ export function toOpenSearchInsightDocument(insight: Insight): SearchInsightDocu
 
   return {
     insight_id: insight.insight_id,
+    text: compact(insight.text),
     family_text: familyText,
     question_answered: questionAnswered,
     summary,
@@ -224,8 +243,9 @@ export function toOpenSearchInsightDocument(insight: Insight): SearchInsightDocu
     document_ids: documentIds,
     source_types: sourceTypes,
     status: insight.status,
-    created_at: insight.createdAt,
-    updated_at: insight.updatedAt,
+    created_at: createdAt,
+    updated_at: updatedAt,
+    expires_at: expiresAt,
     searchable_text: searchableText,
   };
 }
@@ -234,6 +254,8 @@ export function buildPersistedInsightFamilyRecord(
   input: BuildPersistedInsightFamilyInput,
 ): PersistedInsightFamilyRecord {
   const now = new Date().toISOString();
+  const createdAt = toIsoOrUndefined(input.family.created_at) ?? now;
+  const expiresAt = toIsoOrUndefined(input.family.expires_at) ?? addOneYearIso(createdAt);
   const documentIds = uniqueStrings(input.documentIds);
   const sourceTypes = uniqueStrings(input.sourceTypes);
   const filters = uniqueStrings(input.family.filters);
@@ -261,10 +283,15 @@ export function buildPersistedInsightFamilyRecord(
     metadata: normalizeMetadata(input.metadata),
     project_id: input.projectId,
     user_id: input.userId,
+    user_info: input.family.user_info,
     organization_id: input.organizationId,
     status: input.status ?? "Pending",
-    createdAt: now,
+    created_at: createdAt,
+    updated_at: now,
+    createdAt: createdAt,
     updatedAt: now,
+    expires_at: expiresAt,
+    expiresAt: expiresAt,
     additional_refs: {
       object_type: "insight_family",
       question_answered: input.family.question_answered,
@@ -279,6 +306,8 @@ export function buildPersistedInsightFamilyRecord(
       document_ids: documentIds,
       source_types: sourceTypes,
       scope_s3_node: input.scopeS3Node,
+      created_at: createdAt,
+      expires_at: expiresAt,
     },
   };
 
@@ -327,6 +356,7 @@ export async function updateSearchableInsightFamily(
 
   const updatePayload: Insight = {
     ...record.insight,
+    updated_at: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
   await updateInsight(updatePayload);
@@ -397,7 +427,15 @@ export async function syncSearchableInsightFamilies(
     const mergedInsight: Insight = {
       ...existingInsight,
       ...record.insight,
+      created_at: existingInsight.created_at ?? existingInsight.createdAt ?? record.insight.created_at ?? record.insight.createdAt,
+      expires_at:
+        existingInsight.expires_at ??
+        existingInsight.expiresAt ??
+        record.insight.expires_at ??
+        record.insight.expiresAt,
       createdAt: existingInsight.createdAt ?? record.insight.createdAt,
+      expiresAt: existingInsight.expiresAt ?? record.insight.expiresAt,
+      updated_at: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 

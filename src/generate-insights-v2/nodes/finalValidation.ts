@@ -179,6 +179,31 @@ function buildFallbackQuestionAnswered(familyText: string, familyFilters: string
   return `What does the evidence show about ${familyText.toLowerCase()}?`;
 }
 
+function normalizeUserInfo(
+  userInfo: GenerateInsightsV2State["userInfo"],
+): InsightFamily["user_info"] | undefined {
+  const full_name =
+    typeof userInfo?.full_name === "string" ? userInfo.full_name.trim() : undefined;
+  const email_address =
+    typeof userInfo?.email_address === "string" ? userInfo.email_address.trim() : undefined;
+
+  if (!full_name && !email_address) return undefined;
+  return { full_name, email_address };
+}
+
+function toIsoOrUndefined(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+  return parsed.toISOString();
+}
+
+function addOneYearIso(baseIso: string): string {
+  const next = new Date(baseIso);
+  next.setUTCFullYear(next.getUTCFullYear() + 1);
+  return next.toISOString();
+}
+
 export async function finalValidationNode(
   state: GenerateInsightsV2State,
 ): Promise<Partial<GenerateInsightsV2State>> {
@@ -195,6 +220,7 @@ export async function finalValidationNode(
 
   const droppedFamilies: InsightFamily[] = [];
   const groundedFamilies: InsightFamily[] = [];
+  const familyUserInfo = normalizeUserInfo(state.userInfo);
   const tableById = new Map(state.insightFamilyData.map((table) => [table.table_id, table]));
   const firstTableByFamilyId = new Map(state.insightFamilyData.map((table) => [table.family_id, table]));
   let missingFamilyTextBeforeValidation = 0;
@@ -279,10 +305,16 @@ export async function finalValidationNode(
       continue;
     }
 
+    const createdAtIso = toIsoOrUndefined(family.created_at) ?? new Date().toISOString();
+    const expiresAtIso = toIsoOrUndefined(family.expires_at) ?? addOneYearIso(createdAtIso);
+
     const completedFamily: InsightFamily = {
       ...family,
       family_text: familyText,
       question_answered: questionAnswered,
+      user_info: familyUserInfo,
+      created_at: createdAtIso,
+      expires_at: expiresAtIso,
       filters: groundedFilters,
       supporting_finding_ids: supportingFindingIds,
     };

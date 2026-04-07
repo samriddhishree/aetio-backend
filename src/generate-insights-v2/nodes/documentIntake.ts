@@ -1,5 +1,7 @@
 import type { GenerateInsightsV2State, SourceFileType, V2DocumentDescriptor } from "../types";
 import { hashId } from "../../common/services/utils";
+import { randomUUID } from "crypto";
+import { upsertPendingProject } from "../../common/services/projectsTable";
 
 function getFileName(sourceUri: string): string {
   try {
@@ -30,14 +32,8 @@ function buildBaseDocumentId(fileName: string): string {
   return normalized.length <= 160 ? normalized : normalized.slice(-160);
 }
 
-function buildWorkflowProjectId(state: GenerateInsightsV2State): string {
-  const sourceBasis = state.sourceUris
-    .map((uri) => uri.trim())
-    .filter(Boolean)
-    .sort()
-    .join("|");
-  const userBasis = state.userId?.trim() || "anonymous";
-  return `project-v2-${hashId(`${userBasis}|${sourceBasis}`)}`;
+function buildWorkflowProjectId(): string {
+  return `project-v2-${randomUUID()}`;
 }
 
 function detectFileType(sourceUri: string): SourceFileType {
@@ -80,7 +76,23 @@ export async function documentIntakeNode(
     };
   });
 
-  const projectId = state.projectId?.trim() || buildWorkflowProjectId(state);
+  const projectId = state.projectId?.trim() || buildWorkflowProjectId();
+  const userId = state.userId?.trim();
+
+  if (userId) {
+    await upsertPendingProject({
+      userId,
+      projectId,
+      userInfo: state.userInfo,
+      uploadMode: state.uploadMode,
+      researchContext: state.researchContext,
+      contextUrls: state.contextUrls,
+      outputUrls: state.outputUrls,
+      rawDataUrls: state.rawDataUrls,
+    });
+  } else {
+    console.warn("[document-intake] project row not persisted: missing userId", { projectId });
+  }
 
   console.info("[document-intake] normalized documents", {
     documents: documents.length,

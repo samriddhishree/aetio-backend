@@ -12,15 +12,22 @@ import type {
   V2NormalizedDocument,
   V2Table,
 } from "./types";
-import type { PipelineError } from "../types";
+import type { PipelineError, UserInfo } from "../types";
 
 const mergeArray = <T>(left: T[], right: T[]) => left.concat(right);
 const overwrite = <T>(left: T, right: T) => right ?? left;
 
 export const GenerateInsightsV2StateAnnotation = Annotation.Root({
   sourceUris: Annotation<string[]>({ value: mergeArray, default: () => [] }),
+  outputUrls: Annotation<string[] | undefined>({ value: overwrite, default: () => undefined }),
   contextUrls: Annotation<string[] | undefined>({ value: overwrite, default: () => undefined }),
+  rawDataUrls: Annotation<string[] | undefined>({ value: overwrite, default: () => undefined }),
   researchContext: Annotation<string | undefined>({ value: overwrite, default: () => undefined }),
+  uploadMode: Annotation<"document" | "manual" | undefined>({
+    value: overwrite,
+    default: () => undefined,
+  }),
+  userInfo: Annotation<UserInfo | undefined>({ value: overwrite, default: () => undefined }),
   normalizedResearchContext: Annotation<NormalizedResearchContext | undefined>({
     value: overwrite,
     default: () => undefined,
@@ -52,8 +59,12 @@ export const GenerateInsightsV2StateAnnotation = Annotation.Root({
 export const emptyGenerateInsightsV2State = (
   input: {
     sourceUris: string[];
+    outputUrls?: string[];
     contextUrls?: string[];
+    rawDataUrls?: string[];
     researchContext?: string;
+    uploadMode?: "document" | "manual";
+    userInfo?: UserInfo;
     userId?: string;
     projectId?: string;
     organizationId?: string;
@@ -61,8 +72,12 @@ export const emptyGenerateInsightsV2State = (
   },
 ): GenerateInsightsV2State => ({
   sourceUris: input.sourceUris,
+  outputUrls: input.outputUrls,
   contextUrls: input.contextUrls,
+  rawDataUrls: input.rawDataUrls,
   researchContext: input.researchContext,
+  uploadMode: input.uploadMode,
+  userInfo: input.userInfo,
   normalizedResearchContext: undefined,
   userId: input.userId,
   projectId: input.projectId,

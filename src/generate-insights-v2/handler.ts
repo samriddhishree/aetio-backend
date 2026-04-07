@@ -6,7 +6,9 @@ export type GenerateInsightsV2Arguments = {
   // v1-compatible inputs
   outputUrls?: string[];
   contextUrls?: string[];
+  rawDataUrls?: string[];
   researchContext?: string;
+  uploadMode?: "document" | "manual";
   userInfo?: UserInfo;
   user_info?: UserInfo;
   image_blocks?: Array<{ block_id: string; image_s3: string; page: number }>;
@@ -39,6 +41,14 @@ export async function generateInsightsV2Handler(
     typeof event.arguments.researchContext === "string"
       ? event.arguments.researchContext.trim()
       : undefined;
+  const rawDataUrls = (event.arguments.rawDataUrls ?? []).filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  const uploadMode =
+    event.arguments.uploadMode === "document" || event.arguments.uploadMode === "manual"
+      ? event.arguments.uploadMode
+      : undefined;
+  const userInfo = event.arguments.userInfo ?? event.arguments.user_info;
 
   if (outputUrls.length === 0) {
     throw new Error("outputUrls is required and must be a non-empty array.");
@@ -48,8 +58,12 @@ export async function generateInsightsV2Handler(
 
   const state = await runGenerateInsightsV2Pipeline({
     sourceUris,
+    outputUrls,
     contextUrls,
+    rawDataUrls,
     researchContext,
+    uploadMode,
+    userInfo,
     userId: event.arguments.userId,
     projectId: event.arguments.projectId,
     organizationId: event.arguments.organizationId,

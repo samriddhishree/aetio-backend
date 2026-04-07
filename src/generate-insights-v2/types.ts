@@ -1,4 +1,4 @@
-import type { PipelineError } from "../types";
+import type { PipelineError, UserInfo } from "../types";
 
 export type SourceFileType =
   | "pdf"
@@ -45,6 +45,9 @@ export type InsightFamily = {
   family_id: string;
   family_text: string;
   question_answered: string;
+  user_info?: UserInfo;
+  created_at?: string;
+  expires_at?: string;
   filters: string[];
   summary?: string;
   has_grid?: boolean;
@@ -160,8 +163,12 @@ export type V2Table = {
 
 export type GenerateInsightsV2State = {
   sourceUris: string[];
+  outputUrls?: string[];
   contextUrls?: string[];
+  rawDataUrls?: string[];
   researchContext?: string;
+  uploadMode?: "document" | "manual";
+  userInfo?: UserInfo;
   normalizedResearchContext?: NormalizedResearchContext;
   userId?: string;
   projectId?: string;
@@ -193,8 +200,12 @@ export type GenerateInsightsV2State = {
 
 export type GenerateInsightsV2Input = {
   sourceUris: string[];
+  outputUrls?: string[];
   contextUrls?: string[];
+  rawDataUrls?: string[];
   researchContext?: string;
+  uploadMode?: "document" | "manual";
+  userInfo?: UserInfo;
   userId?: string;
   projectId?: string;
   organizationId?: string;

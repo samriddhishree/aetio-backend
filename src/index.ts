@@ -22,7 +22,12 @@ import {
   putInsightFamilyData,
   type PersistedInsightFamilyData,
 } from "./common/services/insightFamilyDataTable";
-import { deleteInsightDocuments, upsertInsightDocument } from "./common/services/elasticsearch";
+import {
+  deleteAllInsightDocuments,
+  deleteInsightDocuments,
+  upsertInsightDocument,
+} from "./common/services/elasticsearch";
+import { listProjectsByUserAndStatus } from "./common/services/projectsTable";
 import { toOpenSearchInsightDocument } from "./generate-insights-v2/services/familyPersistence";
 
 import type { Chunk, FindingRef, Insight } from "./types";
@@ -96,6 +101,99 @@ type AcceptStreamEvent =
 
 app.get("/health", (_req, res) => {
   res.status(200).send("ok");
+});
+
+app.get("/projects", async (req: Request, res: Response) => {
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const status =
+    typeof req.query.status === "string" && req.query.status.trim().length > 0
+      ? req.query.status.trim()
+      : "Pending";
+
+  try {
+    const projects = await listProjectsByUserAndStatus({
+      userId: jwtUserId,
+      status,
+    });
+    return res.status(200).json({ items: projects });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/projects/:projectId", async (req: Request, res: Response) => {
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const projectId = req.params.projectId?.trim();
+  if (!projectId) {
+    return res.status(400).json({ error: "projectId is required in path" });
+  }
+
+  try {
+    const pendingProjects = await listProjectsByUserAndStatus({
+      userId: jwtUserId,
+      status: "Pending",
+    });
+    const project = pendingProjects.find((entry) => entry.project_id === projectId);
+    if (!project) {
+      return res.status(404).json({ error: `Project not found: ${projectId}` });
+    }
+
+    const pendingInsights = await listInsights({
+      status: "Pending",
+      project_id: projectId,
+    });
+    const tableIds = Array.from(
+      new Set(
+        pendingInsights
+          .map((insight) => insight.insight_family_data_id?.trim())
+          .filter((tableId): tableId is string => Boolean(tableId)),
+      ),
+    );
+    const insightFamilyData = (
+      await Promise.all(tableIds.map((tableId) => getInsightFamilyData(tableId)))
+    ).filter((value): value is PersistedInsightFamilyData => Boolean(value));
+    const insightFamilyDataById = new Map(
+      insightFamilyData.map((table) => [table.table_id, table]),
+    );
+    const insightsWithFamilyData = pendingInsights.map((pendingInsight) => {
+      const tableId = pendingInsight.insight_family_data_id?.trim();
+      const linkedFamilyData = tableId ? insightFamilyDataById.get(tableId) : undefined;
+      const existingRefs =
+        pendingInsight.additional_refs &&
+        typeof pendingInsight.additional_refs === "object" &&
+        !Array.isArray(pendingInsight.additional_refs)
+          ? (pendingInsight.additional_refs as Record<string, unknown>)
+          : {};
+
+      return {
+        ...pendingInsight,
+        additional_refs: linkedFamilyData
+          ? {
+              ...existingRefs,
+              insight_family_data: linkedFamilyData,
+            }
+          : existingRefs,
+      };
+    });
+
+    return res.status(200).json({
+      project,
+      insights: insightsWithFamilyData,
+      insightfamilydata: insightFamilyData,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
 });
 
 const toObjectRecord = (value: unknown): Record<string, unknown> =>
@@ -172,7 +270,10 @@ const extractInsightUpdatePatch = (body: unknown): Partial<Insight> => {
   const patch: Partial<Insight> = {};
 
   if (typeof payload.text === "string") patch.text = payload.text;
+  if (typeof payload.created_at === "string") patch.created_at = payload.created_at;
   if (typeof payload.createdAt === "string") patch.createdAt = payload.createdAt;
+  if (typeof payload.expires_at === "string") patch.expires_at = payload.expires_at;
+  if (typeof payload.expiresAt === "string") patch.expiresAt = payload.expiresAt;
   if (typeof payload.summary === "string") patch.summary = payload.summary;
   if (Array.isArray(payload.metadata)) patch.metadata = payload.metadata;
   if (typeof payload.status === "string") patch.status = payload.status;
@@ -484,23 +585,21 @@ app.patch("/insight-family-data/:tableId", async (req: Request, res: Response) =
 
 app.delete("/insights/deleteAll", async (_req: Request, res: Response) => {
   try {
-    const { deletedCount, insightIds } = await deleteAllInsightsWithInsightIds();
+    const { deletedCount } = await deleteAllInsightsWithInsightIds();
 
     try {
-      await deleteInsightDocuments(insightIds);
+      const deletedFromOpenSearch = await deleteAllInsightDocuments();
+      return res.json({
+        deleted: deletedCount,
+        deletedFromOpenSearch,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return res.status(500).json({
-        error: `Dynamo delete succeeded but OpenSearch delete failed: ${message}`,
+        error: `Dynamo delete succeeded but OpenSearch index wipe failed: ${message}`,
         deleted: deletedCount,
-        attemptedOpenSearchDeletes: insightIds.length,
       });
     }
-
-    return res.json({
-      deleted: deletedCount,
-      deletedFromOpenSearch: insightIds.length,
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });

@@ -1,5 +1,7 @@
 import type { InsightMetadataEntry } from "../../types";
 import { hashId } from "../../common/services/utils";
+import { listInsights } from "../../common/services/dynamo";
+import { updatePendingProjectInsightIds } from "../../common/services/projectsTable";
 import {
   buildFamilyPersistenceScope,
   buildPersistedInsightFamilyRecord,
@@ -150,6 +152,31 @@ export async function persistSearchableFamiliesNode(
       deleted: counts.deleted,
       scopeS3Node,
     });
+
+    if (state.userId && state.projectId) {
+      const pendingInsights = await listInsights({
+        status: "Pending",
+        project_id: state.projectId,
+      });
+      const pendingInsightIds = Array.from(
+        new Set(
+          pendingInsights
+            .map((insight) => insight.insight_id?.trim())
+            .filter((insightId): insightId is string => Boolean(insightId)),
+        ),
+      );
+
+      await updatePendingProjectInsightIds({
+        userId: state.userId,
+        projectId: state.projectId,
+        insightIds: pendingInsightIds,
+      });
+
+      console.info("[persist-family] updated project insight ids", {
+        projectId: state.projectId,
+        pendingInsightIds: pendingInsightIds.length,
+      });
+    }
 
     return {
       persistedFamilyCounts: counts,

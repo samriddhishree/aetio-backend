@@ -33,8 +33,12 @@ export type Insight = {
   parent_insight_id?: string | null;
   project_id?: string;
   organization_id?: string;
+  created_at?: string;
+  updated_at?: string;
   createdAt?: string;
   updatedAt?: string;
+  expires_at?: string;
+  expiresAt?: string;
   text: string;
   family_text?: string;
   question_answered?: string;

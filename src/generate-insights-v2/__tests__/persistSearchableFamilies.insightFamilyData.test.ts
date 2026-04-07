@@ -4,6 +4,8 @@ import type { GenerateInsightsV2State } from "../types";
 const mocks = vi.hoisted(() => ({
   syncSearchableInsightFamiliesMock: vi.fn(),
   syncInsightFamilyDataMock: vi.fn(),
+  listInsightsMock: vi.fn(),
+  updatePendingProjectInsightIdsMock: vi.fn(),
 }));
 
 vi.mock("../services/familyPersistence", async () => {
@@ -27,6 +29,14 @@ vi.mock("../services/insightFamilyDataPersistence", async () => {
     syncInsightFamilyData: mocks.syncInsightFamilyDataMock,
   };
 });
+
+vi.mock("../../common/services/dynamo", () => ({
+  listInsights: mocks.listInsightsMock,
+}));
+
+vi.mock("../../common/services/projectsTable", () => ({
+  updatePendingProjectInsightIds: mocks.updatePendingProjectInsightIdsMock,
+}));
 
 import { persistSearchableFamiliesNode } from "../nodes/persistSearchableFamilies";
 
@@ -143,12 +153,26 @@ describe("persistSearchableFamiliesNode with insight family data", () => {
       updated: 0,
       deleted: 0,
     });
+    mocks.listInsightsMock.mockResolvedValueOnce([
+      { insight_id: "fam-1" },
+      { insight_id: "fam-2" },
+    ]);
+    mocks.updatePendingProjectInsightIdsMock.mockResolvedValueOnce(undefined);
 
     const state = makeState();
     const result = await persistSearchableFamiliesNode(state);
 
     expect(mocks.syncSearchableInsightFamiliesMock).toHaveBeenCalledTimes(1);
     expect(mocks.syncInsightFamilyDataMock).toHaveBeenCalledTimes(1);
+    expect(mocks.listInsightsMock).toHaveBeenCalledWith({
+      status: "Pending",
+      project_id: "project-1",
+    });
+    expect(mocks.updatePendingProjectInsightIdsMock).toHaveBeenCalledWith({
+      userId: "user-1",
+      projectId: "project-1",
+      insightIds: ["fam-1", "fam-2"],
+    });
     expect(mocks.syncInsightFamilyDataMock.mock.calls[0]?.[0]?.insightFamilyData).toHaveLength(1);
     expect(result.persistedFamilyCounts).toEqual({ created: 1, updated: 0, deleted: 0 });
     expect(result.persistedInsightFamilyDataCounts).toEqual({ created: 1, updated: 0, deleted: 0 });

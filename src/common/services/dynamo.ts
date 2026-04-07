@@ -27,6 +27,8 @@ const INSIGHTS_BY_USER_ID_INDEX = "GSI_UserId";
 const INSIGHTS_BY_DOCUMENT_ID_INDEX = "GSI_DocumentId";
 const INSIGHTS_BY_PARENT_INSIGHT_ID_INDEX = "GSI_ParentInsightId";
 const INSIGHTS_BY_STATUS_INDEX = "GSI_Status";
+const ENABLE_UNSAFE_DELETE_ALL_INSIGHTS =
+  process.env.ENABLE_UNSAFE_DELETE_ALL_INSIGHTS?.trim().toLowerCase() === "true";
 
 export type InsightFilterKey =
   | "insight_id"
@@ -121,9 +123,7 @@ export async function updateInsight(insight: Insight): Promise<void> {
     return;
   }
 
-  const expressionAttributeNames: Record<string, string> = {
-    "#insight_id": "insight_id",
-  };
+  const expressionAttributeNames: Record<string, string> = {};
   const expressionAttributeValues: Record<string, unknown> = {};
   const setExpressions: string[] = [];
 
@@ -244,9 +244,21 @@ export async function deleteAllInsightsWithInsightIds(): Promise<{
   deletedCount: number;
   insightIds: string[];
 }> {
-  throw new Error(
-    "deleteAllInsightsWithInsightIds is disabled without a dedicated indexed partition strategy.",
+  if (!ENABLE_UNSAFE_DELETE_ALL_INSIGHTS) {
+    throw new Error(
+      "deleteAllInsightsWithInsightIds is disabled. Set ENABLE_UNSAFE_DELETE_ALL_INSIGHTS=true to allow a full-table scan delete.",
+    );
+  }
+
+  const keys = await scanAllInsightKeys();
+  await batchDeleteByKeys(keys);
+  const insightIds = Array.from(
+    new Set(keys.map((key) => key.insight_id).filter((insightId) => insightId.trim().length > 0)),
   );
+  return {
+    deletedCount: keys.length,
+    insightIds,
+  };
 }
 
 export async function deleteInsightsByProjectId(projectId: string): Promise<number> {
@@ -439,6 +451,45 @@ async function scanInsightKeysForProject(
         },
         ExpressionAttributeValues: {
           ":projectId": projectId,
+        },
+        ExclusiveStartKey: lastEvaluatedKey,
+      }),
+    );
+
+    for (const item of response.Items ?? []) {
+      const insightId = item.insight_id;
+      const userId = item.user_id;
+      if (
+        typeof insightId === "string" &&
+        insightId.trim().length > 0 &&
+        typeof userId === "string" &&
+        userId.trim().length > 0
+      ) {
+        keys.set(`${insightId}::${userId}`, {
+          insight_id: insightId,
+          user_id: userId,
+        });
+      }
+    }
+
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastEvaluatedKey);
+
+  return Array.from(keys.values());
+}
+
+async function scanAllInsightKeys(): Promise<Array<{ insight_id: string; user_id: string }>> {
+  const keys = new Map<string, { insight_id: string; user_id: string }>();
+  let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+  do {
+    const response = await docClient.send(
+      new ScanCommand({
+        TableName: config.ddbTableName,
+        ProjectionExpression: "#insight_id, #user_id",
+        ExpressionAttributeNames: {
+          "#insight_id": "insight_id",
+          "#user_id": "user_id",
         },
         ExclusiveStartKey: lastEvaluatedKey,
       }),

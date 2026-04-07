@@ -113,3 +113,22 @@ export async function deleteInsightDocuments(insightIds: string[]): Promise<void
   }
   console.debug("elasticsearch:bulk-delete:done", { count: normalizedIds.length });
 }
+
+export async function deleteAllInsightDocuments(): Promise<number> {
+  console.debug("elasticsearch:delete-all:start", { index: config.openSearchIndex });
+
+  const response = await getElasticClient().deleteByQuery({
+    index: config.openSearchIndex,
+    refresh: false,
+    body: {
+      query: {
+        match_all: {},
+      },
+    },
+    conflicts: "proceed",
+  });
+
+  const deleted = response.body.deleted ?? 0;
+  console.debug("elasticsearch:delete-all:done", { index: config.openSearchIndex, deleted });
+  return deleted;
+}

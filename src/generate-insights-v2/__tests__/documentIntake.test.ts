@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { hashId } from "../../common/services/utils";
 import { documentIntakeNode } from "../nodes/documentIntake";
 import type { GenerateInsightsV2State } from "../types";
+import * as projectsTableService from "../../common/services/projectsTable";
+
+vi.mock("../../common/services/projectsTable", () => ({
+  upsertPendingProject: vi.fn().mockResolvedValue(undefined),
+}));
 
 function makeBaseState(): GenerateInsightsV2State {
   return {
@@ -63,8 +68,23 @@ describe("documentIntakeNode", () => {
     const resultA = await documentIntakeNode(state);
     const resultB = await documentIntakeNode(state);
 
-    expect(resultA.projectId).toMatch(/^project-v2-[a-f0-9]{32}$/);
-    expect(resultA.projectId).toBe(resultB.projectId);
+    expect(resultA.projectId).toMatch(
+      /^project-v2-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(resultA.projectId).not.toBe(resultB.projectId);
+  });
+
+  it("upserts pending project row when userId is available", async () => {
+    const state = makeBaseState();
+    state.sourceUris = ["s3://bucket/documents/example.pdf"];
+
+    const result = await documentIntakeNode(state);
+    expect(projectsTableService.upsertPendingProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-1",
+        projectId: result.projectId,
+      }),
+    );
   });
 
   it("keeps explicit projectId when provided", async () => {
