@@ -128,7 +128,7 @@ export async function deleteAllInsightDocuments(): Promise<number> {
     conflicts: "proceed",
   });
 
-  const deleted = response.body.deleted ?? 0;
+  const deleted = "deleted" in response.body ? response.body.deleted ?? 0 : 0;
   console.debug("elasticsearch:delete-all:done", { index: config.openSearchIndex, deleted });
   return deleted;
 }

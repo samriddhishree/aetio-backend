@@ -320,11 +320,12 @@ const addProjectAcceptCountsOnCompleted = (
 ): Insight[] =>
   insights.map((insight) => {
     if (insight.insight_id !== projectId) return insight;
-    //TODO get this fixed at a point 
-    insight.status = "Pending";
+    const normalizedStatus = insight.status?.toLowerCase();
+    const projectStatus = normalizedStatus === "declined" ? "Declined" : "Accepted";
     const existingRefs = toObjectRecord(insight.additional_refs);
     return {
       ...insight,
+      status: projectStatus,
       additional_refs: {
         ...existingRefs,
         ...counts,
