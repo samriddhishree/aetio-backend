@@ -468,8 +468,8 @@ app.get("/insights", async (req: Request, res: Response) => {
   }
 
   try {
-    const effectiveFilters = applyJwtUserIdFilter(req, parsedFilters);
-    const items = await listInsights(effectiveFilters);
+    // TODO: Support user_id filtering from JWT (sub) for /insights once auth scoping is re-enabled.
+    const items = await listInsights(parsedFilters);
     return res.json({ count: items.length, items });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
