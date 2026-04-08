@@ -20,6 +20,13 @@ type Config = {
   cognitoUserPoolId?: string;
 };
 
+function envValue(name: string): string | undefined {
+  const value = process.env[name];
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export const config: Config = {
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",
   openaiModel: process.env.OPENAI_MODEL ?? "gpt-5.2",
@@ -42,7 +49,7 @@ export const config: Config = {
   documentsBucket: process.env.DOCUMENTS_BUCKET ?? "amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35",
   unstructuredApiKey: process.env.UNSTRUCTURED_API_KEY ?? "",
   unstructuredApiUrl: process.env.UNSTRUCTURED_API_URL ?? "",
-  awsRegion: process.env.AWS_REGION ?? "us-east-2",
+  awsRegion: "us-east-2",
   cognitoUserPoolId: process.env.COGNITO_USER_POOL_ID?.trim(),
 };
 
