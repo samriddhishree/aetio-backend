@@ -195,9 +195,7 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
   >;
 
   if (filterEntries.length === 0) {
-    throw new Error(
-      "listInsights requires at least one indexed filter.",
-    );
+    return scanAllInsights();
   }
 
   const selectedKey = chooseBestQueryKey(filters);
@@ -231,6 +229,32 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
       dedupedById.set(`${item.insight_id}::${item.user_id ?? ""}`, item);
     }
   }
+
+  return Array.from(dedupedById.values());
+}
+
+async function scanAllInsights(): Promise<Insight[]> {
+  const dedupedById = new Map<string, Insight>();
+  let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+  do {
+    const response = await docClient.send(
+      new ScanCommand({
+        TableName: config.ddbTableName,
+        ExclusiveStartKey: lastEvaluatedKey,
+      }),
+    );
+
+    for (const item of response.Items ?? []) {
+      const insight = item as Insight;
+      if (typeof insight.insight_id !== "string" || insight.insight_id.trim().length === 0) {
+        continue;
+      }
+      dedupedById.set(`${insight.insight_id}::${insight.user_id ?? ""}`, insight);
+    }
+
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastEvaluatedKey);
 
   return Array.from(dedupedById.values());
 }

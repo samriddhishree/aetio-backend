@@ -477,6 +477,21 @@ app.get("/insights", async (req: Request, res: Response) => {
   }
 });
 
+app.get("/insights/all", async (req: Request, res: Response) => {
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  try {
+    const items = await listInsights();
+    return res.json({ count: items.length, items });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
+});
+
 app.get("/formatted-insights", async (req: Request, res: Response) => {
   const parsedFilters = extractInsightFilters(req.query);
   if ("error" in parsedFilters) {
