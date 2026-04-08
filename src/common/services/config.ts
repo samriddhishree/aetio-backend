@@ -49,7 +49,7 @@ export const config: Config = {
   documentsBucket: process.env.DOCUMENTS_BUCKET ?? "amplify-amplifyvitereactt-aetioinsightstoragebucke-jzbc7y9yml35",
   unstructuredApiKey: process.env.UNSTRUCTURED_API_KEY ?? "",
   unstructuredApiUrl: process.env.UNSTRUCTURED_API_URL ?? "",
-  awsRegion: "us-east-2",
+  awsRegion: process.env.AWS_REGION ?? "us-east-2",
   cognitoUserPoolId: process.env.COGNITO_USER_POOL_ID?.trim(),
 };
 
