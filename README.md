@@ -91,6 +91,9 @@ Input:
   - `status`
   - `s3_node`
   - `document_id`
+- Notes:
+  - TODO: Re-enable JWT `sub` -> `user_id` server-side filter enforcement for this endpoint.
+  - Current behavior: query `user_id` is accepted as provided and is not overridden by JWT.
 - Query value behavior:
   - `key=value` exact match
   - `key=a,b,c` OR match among values
@@ -180,6 +183,7 @@ flowchart LR
 ## `DELETE /insights/deleteAll`
 
 Description: Deletes all records in the configured insights table.
+This route is intentionally blocked unless `ENABLE_UNSAFE_DELETE_ALL_INSIGHTS=true` is set on the backend process.
 
 Input:
 
@@ -202,7 +206,7 @@ System diagram:
 ```mermaid
 flowchart LR
   C[Client] --> API[Express /insights/deleteAll]
-  API --> DDB[(DynamoDB delete-all disabled without indexed partition strategy)]
+  API --> DDB[(DynamoDB full-table scan delete when explicitly enabled)]
   DDB --> API
   API --> C
 ```
@@ -319,7 +323,7 @@ flowchart LR
 
 ## `POST /generate-insights-v2`
 
-Description: Runs the v2 findings-first pipeline for mixed-source documents (PDF, report-style docs with tables, XLSX/CSV-like tabular data) and returns evidence-grounded structured output.
+Description: Runs the v2 findings-first pipeline for mixed-source documents and returns grounded semantic families, persisted family grids, and reusable dimension metadata.
 
 Input:
 
@@ -327,18 +331,25 @@ Input:
 
 ```json
 {
-  "sourceUris": [
+  "outputUrls": [
     "s3://bucket/scholarly-article-with-table.pdf",
     "s3://bucket/segmented-metrics.xlsx",
     "s3://bucket/third-party-report.pdf"
   ],
+  "contextUrls": ["s3://bucket/context-summary.pdf"],
+  "rawDataUrls": [],
+  "researchContext": "Optional analysis lens",
+  "uploadMode": "document",
+  "userInfo": { "full_name": "Analyst", "email_address": "analyst@example.com" },
   "projectId": "optional-project-id",
   "organizationId": "optional-org-id",
   "status": "optional-status"
 }
 ```
 
-- `outputUrls` is accepted as an alias for `sourceUris`.
+- `sourceUris` is accepted as an alias for `outputUrls`.
+- The API currently requires at least one `outputUrls`/`sourceUris` value.
+- `contextUrls` are merged with `outputUrls` for extraction (`sourceUris = outputUrls + contextUrls`).
 - Required header:
   - `Authorization: Bearer <jwt>` (JWT `sub` is used as `userId`)
 - Optional header:
@@ -351,18 +362,41 @@ Output:
 ```json
 {
   "documents": [{ "document_id": "...", "source_uri": "s3://...", "file_type": "pdf" }],
-  "findings": [],
+  "findings": [{ "finding_id": "...", "text": "...", "dimensions": [], "supporting_refs": [] }],
   "insight_families": [
     {
+      "insight_id": "...",
       "family_id": "...",
       "family_text": "Conversion performance differs across marketing channels and age groups",
       "question_answered": "How does conversion performance vary across channels and demographic segments?",
       "filters": ["channel", "age_group"],
+      "has_grid": true,
+      "insight_family_data_id": "table-...",
+      "row_count": 3,
+      "table_dimensions": ["Channel", "Age Group"],
+      "metric_columns": ["conversion_rate_change"],
       "summary": "Optional family summary",
       "supporting_finding_ids": ["..."]
     }
   ],
-  "insight_rows": []
+  "insight_rows": [],
+  "insight_family_data": [
+    {
+      "table_id": "table-...",
+      "family_id": "...",
+      "dimensions": ["Channel", "Age Group"],
+      "metric_columns": ["conversion_rate_change"],
+      "row_count": 3,
+      "rows": []
+    }
+  ],
+  "dimension_metadata": [
+    {
+      "dimension_id": "dim_...",
+      "canonical_name": "age_group",
+      "allowed_values": []
+    }
+  ]
 }
 ```
 
@@ -376,37 +410,67 @@ Output:
 |---|---|---|
 | `DocumentIntake` | Normalizes input URIs into canonical document descriptors and detects file type for routing. | `documents[]` with `document_id`, `source_uri`, `file_type` |
 | `ContentExtraction` | Fetches source files and parses via Unstructured API, preserving element-level provenance (page/section/type/sheet metadata when available). | `extractedDocuments[]` |
-| `Normalization` | Converts extracted elements into first-class text chunks and table objects. | `chunks[]`, `tables[]`, `normalizedDocuments[]` |
+| `Normalization` | Converts extracted elements into first-class text chunks and table objects. For delimited text, splits multi-grid blocks and infers structural header rows. | `chunks[]`, `tables[]`, `normalizedDocuments[]` |
 | `FindingExtraction` | Produces atomic, evidence-grounded findings from chunk/table evidence units, preserving quantitative details and dimensions. | `findings[]` |
 | `FindingCritique` | Applies deterministic + semantic validation to remove unsupported, duplicate, vague, or inconsistent findings. | `validatedFindings[]` |
-| `FilterExtraction` | Derives reusable metadata dimension tags across validated findings (e.g., `age_group`, `geography`, `time_period`). | `metadataFilters[]` |
-| `FamilyGrouping` | Groups related findings into insight families and generates searchable family description fields (`family_text`, `question_answered`) backed by supporting finding IDs. | `insightFamilies[]` |
-| `InstanceTableBuilder` | Builds family instance rows from grouped findings using family filters and finding-level dimensions. | `insightRows[]` |
-| `FinalValidation` | Enforces grounding and quality consistency: families must map to findings, `family_text`/`question_answered` must be non-trivial, filters must be grounded, rows must carry evidence refs. | filtered `insightFamilies[]`, `insightRows[]` |
-| `PersistSearchableFamilies` | Persists only search-relevant family-level records to DynamoDB and synchronizes OpenSearch using explicit CRUD sync (create/index, update/upsert, delete/delete). | persisted/indexed searchable family layer |
+| `MetadataDimensionExtraction` | Extracts candidate dimensions from validated findings, canonicalizes reusable dimension metadata, and derives family filter candidates. | `metadataFilters[]`, `dimensionMetadata[]` |
+| `ResearchContextPreprocess` | Normalizes optional research context into concise guidance fields (`short_summary`, `key_topics`, `key_questions`). | `normalizedResearchContext` |
+| `FamilyGrouping` | Groups validated findings into semantically grounded families (`family_text`, `question_answered`, `filters`, `supporting_finding_ids`). | `insightFamilies[]` |
+| `InsightFamilyDataBuilder` | Infers family grid schema, builds normalized rows, deduplicates duplicate rows, and links families to table IDs. | `insightFamilyData[]`, `insightRows[]`, enriched families |
+| `InsightFamilyDataValidation` | Validates row evidence, dimension alignment, and family-table consistency; marks invalid tabular families as non-tabular. | repaired `insightFamilyData[]`, `insightRows[]`, families |
+| `FinalValidation` | Final grounding checks on families and tables before persistence. | final response-ready families/tables/rows |
+| `PersistSearchableFamilies` | Persists family semantic layer, full `InsightFamilyData`, and `DimensionMetadata` to DynamoDB; syncs only family search docs to OpenSearch. | persisted counts and synced index docs |
+
+### Data model boundary
+
+- `InsightFamily` (semantic/search layer):
+  - `family_text`, `question_answered`, `filters`, `has_grid`, `insight_family_data_id`, `row_count`, linkage/auth fields.
+- `InsightFamilyData` (full persisted normalized row table):
+  - `table_id`, `family_id`, `dimensions`, `metric_columns`, `rows[]`, `row_count`.
+  - Persists all supported normalized rows; no unsupported Cartesian products.
+- `DimensionMetadata` (reusable schema layer):
+  - canonical dimensions/values, aliases/synonyms, optional hierarchies, normalization behavior.
+
+### CSV/XLSX handling notes
+
+- Multiple grids in one extracted table element are supported for delimited text blocks:
+  - separator rows split blocks;
+  - header row is inferred using structural heuristics;
+  - each block becomes its own normalized table.
+- Placeholder dimension names are excluded from metadata/filter schema:
+  - `unnamed_*`, `column_*` (and variants) are treated as non-reusable dimensions.
+- `insight_family_data.dimensions` prefers original source labels where available (for product rendering), while row filters still reference canonical metadata IDs.
 
 ### Persistence and indexing boundary
 
-- Persisted in primary DB (`Insight` records for family layer):
+- Persisted in DynamoDB:
+  - family semantic records (`insights` table)
+  - `InsightFamilyData` table (`insightfamilydata`)
+  - `DimensionMetadata` table (`dimensionmetadata`)
+- Family-level record fields include:
   - `insight_id` (family id)
   - `family_text` / `text`
   - `question_answered`
   - `summary`
   - `filters`
+  - `has_grid`, `insight_family_data_id`, `row_count`, `table_dimensions`, `metric_columns`
   - family-level `metadata`
   - `project_id`, `user_id`, `organization_id` (when provided)
   - `document_id` + `document_ids`
   - `source_types`
   - `status`, timestamps
-- Indexed in OpenSearch (compact search projection):
+- Indexed in OpenSearch (family-level projection only):
   - `insight_id`, `family_text`, `question_answered`, `summary`
-  - `filters`, `metadata`
+  - `filters`, family metadata
+  - `has_grid`, `insight_family_data_id`, `row_count`, `table_dimensions`, `metric_columns`
   - `project_id`, `user_id`, `organization_id`
   - `document_ids`, `source_types`, `status`, timestamps
   - derived `searchable_text`
-- Intentionally NOT persisted/indexed as primary semantic records:
+- Intentionally NOT indexed in OpenSearch:
+  - full row payloads from `InsightFamilyData`
+  - full `DimensionMetadata` payloads
+- Intentionally kept as source artifacts (not product semantic rows):
   - raw extracted tables/cells
-  - full row-level extraction payloads
   - transient normalization/intermediate workflow artifacts
 
 System diagram:
@@ -419,13 +483,30 @@ flowchart LR
   CE --> N[Normalization]
   N --> FE[FindingExtraction]
   FE --> FC[FindingCritique]
-  FC --> MF[FilterExtraction]
-  MF --> FG[FamilyGrouping]
-  FG --> IT[InstanceTableBuilder]
-  IT --> FV[FinalValidation]
-  FV --> API
+  FC --> MD[MetadataDimensionExtraction]
+  MD --> RC[ResearchContextPreprocess]
+  RC --> FG[FamilyGrouping]
+  FG --> FD[InsightFamilyDataBuilder]
+  FD --> FV2[InsightFamilyDataValidation]
+  FV2 --> FV[FinalValidation]
+  FV --> PSF[PersistSearchableFamilies]
+  PSF --> DDB[(DynamoDB: families + familydata + metadata)]
+  PSF --> OS[(OpenSearch: family docs)]
+  PSF --> API
   API --> C
 ```
+
+### Useful tests and scripts
+
+- Unit tests (selected):
+  - `src/generate-insights-v2/__tests__/normalizeContent.subgrids.test.ts`
+  - `src/generate-insights-v2/__tests__/extractFindings.tableContext.test.ts`
+  - `src/generate-insights-v2/__tests__/metadataService.test.ts`
+  - `src/generate-insights-v2/__tests__/insightFamilyDataBuilder.test.ts`
+  - `src/generate-insights-v2/__tests__/persistSearchableFamilies.insightFamilyData.test.ts`
+- Integration scripts:
+  - `scripts/generate-insights-v2-test.mjs`
+  - `scripts/generate-insights-v2-s3-validate.mjs`
 
 ---
 ## Pending TODOs
@@ -433,6 +514,7 @@ flowchart LR
 - `src/common/services/dynamo.ts`: fixed-index query paths (`insight_id` PK and GSIs `GSI_UserId`/`GSI_DocumentId`/`GSI_ParentInsightId`/`GSI_Status`) with a project-delete scan fallback.
 - `src/generate-insights/agents/semanticRevisionPlanner.ts`: TODO reassess deletion policy; `remove` actions are currently downgraded and retained.
 - `src/generate-insights/agents/revisionApplier.ts`: TODO reassess deletion policy; suspected hallucinations are currently retained with lowered confidence.
+- `src/index.ts` (`GET /insights`): TODO re-enable JWT `sub` -> `user_id` filter enforcement.
 - `src/index.ts`: TODO marker for existing ref-handling cleanup.
 
 ---
@@ -456,6 +538,7 @@ curl -X POST http://localhost:8000/generate-insights-v2 \
 Delete all records:
 
 ```bash
+ENABLE_UNSAFE_DELETE_ALL_INSIGHTS=true \
 node scripts/delete-all-insights.mjs
 ```
 
