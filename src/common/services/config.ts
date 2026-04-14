@@ -11,6 +11,9 @@ type Config = {
   insightFamilyDataTableName: string;
   insightFamilyDataType: string;
   insightFamilyDataScopeSuffix: string;
+  dimensionMetadataTableName: string;
+  dimensionMetadataType: string;
+  dimensionMetadataScopeSuffix: string;
   openSearchNode: string;
   openSearchIndex: string;
   documentsBucket: string;
@@ -42,6 +45,11 @@ export const config: Config = {
   insightFamilyDataType: process.env.INSIGHT_FAMILY_DATA_TYPE ?? "insightfamilydata",
   insightFamilyDataScopeSuffix:
     process.env.INSIGHT_FAMILY_DATA_SCOPE_SUFFIX ?? "insightfamilydata",
+  dimensionMetadataTableName:
+    process.env.DIMENSION_METADATA_TABLE_NAME ?? "dimensionmetadata",
+  dimensionMetadataType: process.env.DIMENSION_METADATA_TYPE ?? "dimensionmetadata",
+  dimensionMetadataScopeSuffix:
+    process.env.DIMENSION_METADATA_SCOPE_SUFFIX ?? "dimensionmetadata",
   openSearchNode:
     process.env.OPENSEARCH_NODE ??
     "https://search-aetio-insights-itr47ew4zvtmse7drfwehqxcne.us-east-2.es.amazonaws.com",

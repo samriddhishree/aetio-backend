@@ -1,11 +1,15 @@
 import { config } from "../../common/services/config";
 import { openai, OPENAI_HELPER_MODEL } from "../../common/services/openai";
-import { chunkArray, hashId, mapWithConcurrency } from "../../common/services/utils";
+import { hashId, mapWithConcurrency } from "../../common/services/utils";
 import type { PipelineError } from "../../types";
 import {
   FINDING_EXTRACTION_PROMPT,
   FINDING_EXTRACTION_SCHEMA,
 } from "../prompts";
+import {
+  filterDimensionsToValidMetadata,
+  resolveValidMetadataFields,
+} from "../services/metadataFieldPolicy";
 import type {
   Finding,
   GenerateInsightsV2State,
@@ -15,22 +19,19 @@ import type {
   V2Table,
 } from "../types";
 
-type EvidenceUnit = {
-  unit_id: string;
-  document_id: string;
-  source_modality: "text" | "table";
-  chunk_id?: string;
-  table_id?: string;
-  row_index?: number;
-  page?: number;
-  section_title?: string;
-  source_file: string;
-  element_type: string;
-  sheet_name?: string;
-  table_region?: string;
-  text: string;
-  dimensions: MetadataDimension[];
-};
+type ExtractionTarget =
+  | {
+      target_id: string;
+      source_modality: "text";
+      document_id: string;
+      chunk: V2Chunk;
+    }
+  | {
+      target_id: string;
+      source_modality: "table";
+      document_id: string;
+      table: V2Table;
+    };
 
 type FindingExtractionResponse = {
   findings: Array<{
@@ -40,20 +41,18 @@ type FindingExtractionResponse = {
     dimensions?: Array<{ tag: string; value: string }>;
     confidence?: number | null;
     source_modality: "text" | "table";
+    top_level_group_id?: string | null;
     supporting_unit_ids: string[];
   }>;
 };
 
-const MAX_UNIT_TEXT_CHARS = 900;
-const FINDING_BATCH_SIZE = 18;
+type TargetExtractionResult = {
+  findings: Finding[];
+  error?: PipelineError;
+};
 
 function toCompact(value: string): string {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function truncate(value: string, maxChars: number): string {
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars - 3)}...`;
 }
 
 function isNumericLike(value: string): boolean {
@@ -69,15 +68,65 @@ function sanitizeDimensionTag(value: string): string {
     .slice(0, 48);
 }
 
+function isIdentifierLikeTag(value: string): boolean {
+  const normalized = sanitizeDimensionTag(value);
+  return /(^|_)(id|code|store|employee|account|member|sku|zip|postal|number|no)(_|$)/.test(
+    normalized,
+  );
+}
+
+function isPlaceholderDimensionTag(value: string): boolean {
+  const normalized = sanitizeDimensionTag(value);
+  if (!normalized) return true;
+  if (/^unnamed_?\d*$/.test(normalized)) return true;
+  if (/^(column|col)_\d+$/.test(normalized)) return true;
+  return false;
+}
+
 function sanitizeDimensions(dimensions: Array<{ tag: string; value: string }>): MetadataDimension[] {
-  const byTag = new Map<string, string>();
+  const byTag = new Map<string, MetadataDimension>();
   for (const dimension of dimensions) {
-    const tag = sanitizeDimensionTag(dimension.tag ?? "");
+    const normalizedTag = sanitizeDimensionTag(dimension.tag ?? "");
+    const tag = toCompact(dimension.tag ?? "");
     const value = toCompact(dimension.value ?? "");
-    if (!tag || !value) continue;
-    if (!byTag.has(tag)) byTag.set(tag, value);
+    if (!normalizedTag || !value) continue;
+    if (!byTag.has(normalizedTag)) {
+      byTag.set(normalizedTag, { tag: tag || normalizedTag, value });
+    }
   }
-  return Array.from(byTag.entries()).map(([tag, value]) => ({ tag, value }));
+  return Array.from(byTag.values());
+}
+
+function mergeDimensionsPrioritizingSource(input: {
+  sourceDimensions: MetadataDimension[];
+  modelDimensions: MetadataDimension[];
+}): MetadataDimension[] {
+  if (input.sourceDimensions.length > 0 && input.modelDimensions.length > 0) {
+    return sanitizeDimensions([...input.sourceDimensions, ...input.modelDimensions]);
+  }
+  if (input.sourceDimensions.length > 0) return sanitizeDimensions(input.sourceDimensions);
+  return sanitizeDimensions(input.modelDimensions);
+}
+
+function tableRowUnitId(tableId: string, rowIndex: number): string {
+  return `table:${tableId}:row:${rowIndex}`;
+}
+
+function tableUnitId(tableId: string): string {
+  return `table:${tableId}`;
+}
+
+function chunkUnitId(chunkId: string): string {
+  return `chunk:${chunkId}`;
+}
+
+function parseTableRowIndexFromUnitId(unitId: string, tableId: string): number | undefined {
+  const prefix = `table:${tableId}:row:`;
+  if (!unitId.startsWith(prefix)) return undefined;
+  const suffix = unitId.slice(prefix.length);
+  const parsed = Number.parseInt(suffix, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return parsed;
 }
 
 function buildRowDimensions(table: V2Table, cells: string[]): MetadataDimension[] {
@@ -88,143 +137,297 @@ function buildRowDimensions(table: V2Table, cells: string[]): MetadataDimension[
   for (let index = 0; index < maxPairs; index += 1) {
     const rawTag = table.headers[index] ?? `column_${index + 1}`;
     const rawValue = cells[index] ?? "";
-    const tag = sanitizeDimensionTag(rawTag);
+    const tag = toCompact(rawTag);
     const value = toCompact(rawValue);
-    if (!tag || !value || isNumericLike(value)) continue;
+    if (!tag || !value) continue;
+    if (isPlaceholderDimensionTag(tag)) continue;
+    if (isNumericLike(value) && !isIdentifierLikeTag(tag)) continue;
     dimensions.push({ tag, value });
   }
   return dimensions;
 }
 
-function buildTextEvidenceUnits(chunks: V2Chunk[]): EvidenceUnit[] {
-  const units: EvidenceUnit[] = [];
+function buildExtractionTargets(chunks: V2Chunk[], tables: V2Table[]): ExtractionTarget[] {
+  const targets: ExtractionTarget[] = [];
+
   for (const chunk of chunks) {
-    const text = truncate(toCompact(chunk.text), MAX_UNIT_TEXT_CHARS);
-    if (!text) continue;
-    units.push({
-      unit_id: `chunk:${chunk.chunk_id}`,
-      document_id: chunk.document_id,
+    if (!toCompact(chunk.text)) continue;
+    targets.push({
+      target_id: chunkUnitId(chunk.chunk_id),
       source_modality: "text",
-      chunk_id: chunk.chunk_id,
-      page: chunk.page,
-      section_title: chunk.section_title,
-      source_file: chunk.source_uri,
-      element_type: chunk.element_type,
-      text,
-      dimensions: [],
+      document_id: chunk.document_id,
+      chunk,
     });
   }
-  return units;
-}
-
-function buildTableEvidenceUnits(tables: V2Table[]): EvidenceUnit[] {
-  const units: EvidenceUnit[] = [];
 
   for (const table of tables) {
-    if (table.rows.length > 0) {
-      for (const row of table.rows) {
-        const rowText = table.headers.length > 0
-          ? table.headers
-              .map((header, index) => `${header}: ${row.cells[index] ?? ""}`)
-              .join(" | ")
-          : row.cells.join(" | ");
-        const normalizedRowText = truncate(toCompact(rowText), MAX_UNIT_TEXT_CHARS);
-        if (!normalizedRowText) continue;
-        units.push({
-          unit_id: `table:${table.table_id}:row:${row.row_index}`,
-          document_id: table.document_id,
-          source_modality: "table",
-          table_id: table.table_id,
-          row_index: row.row_index,
-          page: table.page,
-          section_title: table.section_title,
-          source_file: table.source_uri,
-          element_type: table.element_type,
-          sheet_name: table.sheet_name,
-          table_region: table.table_region,
-          text: normalizedRowText,
-          dimensions: buildRowDimensions(table, row.cells),
-        });
-      }
-    }
+    if (table.rows.length === 0 && !toCompact(table.raw_text)) continue;
+    targets.push({
+      target_id: tableUnitId(table.table_id),
+      source_modality: "table",
+      document_id: table.document_id,
+      table,
+    });
+  }
 
-    if (table.rows.length === 0 && table.raw_text.trim().length > 0) {
-      units.push({
-        unit_id: `table:${table.table_id}`,
-        document_id: table.document_id,
-        source_modality: "table",
-        table_id: table.table_id,
-        page: table.page,
-        section_title: table.section_title,
-        source_file: table.source_uri,
-        element_type: table.element_type,
-        sheet_name: table.sheet_name,
-        table_region: table.table_region,
-        text: truncate(toCompact(table.raw_text), MAX_UNIT_TEXT_CHARS),
-        dimensions: [],
-      });
+  return targets;
+}
+
+function defaultSupportingUnitIds(target: ExtractionTarget): string[] {
+  if (target.source_modality === "text") {
+    return [chunkUnitId(target.chunk.chunk_id)];
+  }
+
+  if (target.table.rows.length > 0) {
+    return [tableRowUnitId(target.table.table_id, target.table.rows[0]?.row_index ?? 0)];
+  }
+  return [tableUnitId(target.table.table_id)];
+}
+
+function allowedSupportingUnitIds(target: ExtractionTarget): string[] {
+  if (target.source_modality === "text") {
+    return [chunkUnitId(target.chunk.chunk_id)];
+  }
+
+  const rowIds = target.table.rows.map((row) => tableRowUnitId(target.table.table_id, row.row_index));
+  return [tableUnitId(target.table.table_id), ...rowIds];
+}
+
+function buildTargetInput(
+  target: ExtractionTarget,
+  input?: { validMetadataFields?: string[] },
+) {
+  const allowedIds = allowedSupportingUnitIds(target);
+  const validMetadataFields = (input?.validMetadataFields ?? [])
+    .map((field) => toCompact(field))
+    .filter((field) => field.length > 0);
+  const validMetadataFieldSet = new Set(validMetadataFields);
+  const metadataTagValueOptions = buildMetadataTagValueOptions(target, validMetadataFieldSet);
+
+  if (target.source_modality === "text") {
+    return {
+      source_modality: "text",
+      target_id: target.target_id,
+      allowed_supporting_unit_ids: allowedIds,
+      ...(validMetadataFields.length > 0
+        ? { valid_metadata_fields: validMetadataFields }
+        : {}),
+      ...(metadataTagValueOptions.length > 0
+        ? { metadata_tag_value_options: metadataTagValueOptions }
+        : {}),
+      chunk: {
+        chunk_id: target.chunk.chunk_id,
+        document_id: target.chunk.document_id,
+        source_uri: target.chunk.source_uri,
+        page: target.chunk.page,
+        section_title: target.chunk.section_title,
+        element_type: target.chunk.element_type,
+        text: target.chunk.text,
+      },
+    };
+  }
+
+  return {
+    source_modality: "table",
+    target_id: target.target_id,
+    allowed_supporting_unit_ids: allowedIds,
+    ...(validMetadataFields.length > 0
+      ? { valid_metadata_fields: validMetadataFields }
+      : {}),
+    ...(metadataTagValueOptions.length > 0
+      ? { metadata_tag_value_options: metadataTagValueOptions }
+      : {}),
+    table: {
+      table_id: target.table.table_id,
+      document_id: target.table.document_id,
+      source_uri: target.table.source_uri,
+      page: target.table.page,
+      section_title: target.table.section_title,
+      element_type: target.table.element_type,
+      sheet_name: target.table.sheet_name,
+      table_region: target.table.table_region,
+      headers: target.table.headers,
+      rows: target.table.rows.map((row) => ({
+        row_index: row.row_index,
+        cells: row.cells,
+        row_dimensions: buildRowDimensions(target.table, row.cells),
+      })),
+      raw_text: target.table.raw_text,
+    },
+  };
+}
+
+function buildMetadataTagValueOptions(
+  target: ExtractionTarget,
+  validMetadataFields: Set<string>,
+): Array<{ tag: string; values: string[] }> {
+  if (validMetadataFields.size === 0) return [];
+
+  const valuesByTag = new Map<string, { tag: string; values: Set<string> }>();
+  const addDimension = (dimension: MetadataDimension) => {
+    const [cleaned] = filterDimensionsToValidMetadata([dimension], validMetadataFields);
+    if (!cleaned) return;
+    const key = sanitizeDimensionTag(cleaned.tag);
+    if (!key) return;
+    const existing = valuesByTag.get(key) ?? { tag: cleaned.tag, values: new Set<string>() };
+    existing.values.add(cleaned.value);
+    valuesByTag.set(key, existing);
+  };
+
+  if (target.source_modality === "text") {
+    for (const dimension of buildChunkMetadataDimensions(target.chunk)) {
+      addDimension(dimension);
+    }
+  } else {
+    for (const row of target.table.rows) {
+      for (const dimension of buildRowDimensions(target.table, row.cells)) {
+        addDimension(dimension);
+      }
     }
   }
 
-  return units;
+  return Array.from(valuesByTag.values())
+    .map((entry) => ({
+      tag: entry.tag,
+      values: Array.from(entry.values).sort((left, right) => left.localeCompare(right)),
+    }))
+    .sort((left, right) => left.tag.localeCompare(right.tag));
 }
 
-function buildSupportingRef(unit: EvidenceUnit): SupportingRef {
+function buildChunkSupportingRef(chunk: V2Chunk): SupportingRef {
   return {
-    chunk_id: unit.chunk_id,
-    table_id: unit.table_id,
-    row_index: unit.row_index,
-    page: unit.page,
-    section_title: unit.section_title,
-    source_excerpt: truncate(unit.text, 260),
-    source_file: unit.source_file,
-    element_type: unit.element_type,
-    sheet_name: unit.sheet_name,
-    table_region: unit.table_region,
+    chunk_id: chunk.chunk_id,
+    page: chunk.page,
+    section_title: chunk.section_title,
+    source_excerpt: toCompact(chunk.text).slice(0, 260),
+    source_file: chunk.source_uri,
+    element_type: chunk.element_type,
   };
 }
 
-function toBatchInput(units: EvidenceUnit[]) {
+function buildTableSupportingRef(table: V2Table, rowIndex?: number): SupportingRef {
+  const row = typeof rowIndex === "number"
+    ? table.rows.find((candidate) => candidate.row_index === rowIndex)
+    : undefined;
+  const rowText = row
+    ? table.headers.map((header, index) => `${header}: ${row.cells[index] ?? ""}`).join(" | ")
+    : table.raw_text;
+
   return {
-    units: units.map((unit) => ({
-      unit_id: unit.unit_id,
-      source_modality: unit.source_modality,
-      page: unit.page,
-      section_title: unit.section_title,
-      dimensions: unit.dimensions,
-      text: unit.text,
-    })),
+    table_id: table.table_id,
+    row_index: rowIndex,
+    page: table.page,
+    section_title: table.section_title,
+    source_excerpt: toCompact(rowText).slice(0, 260),
+    source_file: table.source_uri,
+    element_type: table.element_type,
+    sheet_name: table.sheet_name,
+    table_region: table.table_region,
   };
 }
 
-function normalizeModelFindings(
+function buildChunkMetadataDimensions(chunk: V2Chunk): MetadataDimension[] {
+  const dimensions: MetadataDimension[] = [];
+  if (typeof chunk.page === "number" && Number.isFinite(chunk.page)) {
+    dimensions.push({ tag: "Page", value: String(chunk.page) });
+  }
+  if (chunk.section_title && toCompact(chunk.section_title)) {
+    dimensions.push({ tag: "Section", value: toCompact(chunk.section_title) });
+  }
+  if (chunk.element_type && toCompact(chunk.element_type)) {
+    dimensions.push({ tag: "Element Type", value: toCompact(chunk.element_type) });
+  }
+  return sanitizeDimensions(dimensions);
+}
+
+function sourceDimensionsFromSupport(target: ExtractionTarget, supportingUnitIds: string[]): MetadataDimension[] {
+  if (target.source_modality === "text") return buildChunkMetadataDimensions(target.chunk);
+
+  const dimensions: MetadataDimension[] = [];
+  const seen = new Set<number>();
+  for (const unitId of supportingUnitIds) {
+    const rowIndex = parseTableRowIndexFromUnitId(unitId, target.table.table_id);
+    if (typeof rowIndex !== "number" || seen.has(rowIndex)) continue;
+    seen.add(rowIndex);
+    const row = target.table.rows.find((candidate) => candidate.row_index === rowIndex);
+    if (!row) continue;
+    dimensions.push(...buildRowDimensions(target.table, row.cells));
+  }
+
+  return sanitizeDimensions(dimensions);
+}
+
+function supportingRefsFromIds(target: ExtractionTarget, supportingUnitIds: string[]): SupportingRef[] {
+  if (target.source_modality === "text") {
+    return [buildChunkSupportingRef(target.chunk)];
+  }
+
+  const refs: SupportingRef[] = [];
+  const seen = new Set<string>();
+  for (const unitId of supportingUnitIds) {
+    if (unitId === tableUnitId(target.table.table_id)) {
+      const ref = buildTableSupportingRef(target.table);
+      const key = `${ref.table_id}|${ref.row_index ?? "table"}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        refs.push(ref);
+      }
+      continue;
+    }
+
+    const rowIndex = parseTableRowIndexFromUnitId(unitId, target.table.table_id);
+    if (typeof rowIndex !== "number") continue;
+    const rowExists = target.table.rows.some((row) => row.row_index === rowIndex);
+    if (!rowExists) continue;
+    const ref = buildTableSupportingRef(target.table, rowIndex);
+    const key = `${ref.table_id}|${ref.row_index ?? "table"}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      refs.push(ref);
+    }
+  }
+
+  return refs.length > 0 ? refs : [buildTableSupportingRef(target.table)];
+}
+
+function normalizeModelFindingsForTarget(
   response: FindingExtractionResponse,
-  unitById: Map<string, EvidenceUnit>,
-  fallbackUnit: EvidenceUnit,
-): Finding[] {
+  target: ExtractionTarget,
+  input: {
+    validMetadataFields: Set<string>;
+  },
+): { findings: Finding[] } {
   const findings: Finding[] = [];
+  const allowedIds = new Set(allowedSupportingUnitIds(target));
+  const fallbackIds = defaultSupportingUnitIds(target);
 
   for (const [index, item] of (response.findings ?? []).entries()) {
     const findingText = toCompact(item.text ?? "");
     if (!findingText) continue;
 
-    const matchedUnits = item.supporting_unit_ids
-      .map((unitId) => unitById.get(unitId))
-      .filter((unit): unit is EvidenceUnit => Boolean(unit));
+    const modelDimensions = filterDimensionsToValidMetadata(
+      sanitizeDimensions(item.dimensions ?? []),
+      input.validMetadataFields,
+    );
+    const rawSupportingIds = Array.isArray(item.supporting_unit_ids)
+      ? item.supporting_unit_ids.map((value) => toCompact(String(value)))
+      : [];
+    const matchedSupportingIds = rawSupportingIds.filter((unitId) => allowedIds.has(unitId));
+    const resolvedSupportingIds = matchedSupportingIds.length > 0 ? matchedSupportingIds : fallbackIds;
 
-    const supportingUnits = matchedUnits.length > 0 ? matchedUnits : [fallbackUnit];
-    const dimensions = sanitizeDimensions(item.dimensions ?? []);
-    const fallbackDimensions = supportingUnits.flatMap((unit) => unit.dimensions);
+    const sourceDimensions = sourceDimensionsFromSupport(target, resolvedSupportingIds);
+    const finalDimensions = mergeDimensionsPrioritizingSource({
+      sourceDimensions,
+      modelDimensions,
+    });
+    const supportingRefs = supportingRefsFromIds(target, resolvedSupportingIds);
 
-    const finalDimensions = dimensions.length > 0
-      ? dimensions
-      : sanitizeDimensions(fallbackDimensions);
-
-    const supportingRefs = supportingUnits.map((unit) => buildSupportingRef(unit));
-
-    const primaryUnit = supportingUnits[0] ?? fallbackUnit;
     findings.push({
-      finding_id: hashId(`${primaryUnit.document_id}:${findingText}:${index}`),
+      finding_id: hashId(`${target.document_id}:${target.target_id}:${findingText}:${index}`),
+      top_level_group_id:
+        typeof item.top_level_group_id === "string" && item.top_level_group_id.trim().length > 0
+          ? toCompact(item.top_level_group_id)
+          : target.target_id,
       text: findingText,
       metric_value:
         typeof item.metric_value === "string" || typeof item.metric_value === "number"
@@ -237,11 +440,11 @@ function normalizeModelFindings(
           ? Math.max(0, Math.min(1, item.confidence))
           : undefined,
       supporting_refs: supportingRefs,
-      source_modality: item.source_modality ?? primaryUnit.source_modality,
+      source_modality: target.source_modality,
     });
   }
 
-  return findings;
+  return { findings };
 }
 
 export async function extractFindingsNode(
@@ -252,38 +455,26 @@ export async function extractFindingsNode(
     tables: state.tables.length,
   });
 
-  const textUnits = buildTextEvidenceUnits(state.chunks);
-  const tableUnits = buildTableEvidenceUnits(state.tables);
-  const evidenceUnits = [...textUnits, ...tableUnits];
+  const targets = buildExtractionTargets(state.chunks, state.tables);
+  const validMetadataFields = resolveValidMetadataFields({
+    metadataFilters: state.metadataFilters,
+    dimensionMetadata: state.dimensionMetadata,
+  });
+  const validMetadataFieldList = Array.from(validMetadataFields).sort((left, right) =>
+    left.localeCompare(right),
+  );
 
-  if (evidenceUnits.length === 0) {
-    console.warn("[finding-extraction] no evidence units available");
+  if (targets.length === 0) {
+    console.warn("[finding-extraction] no extraction targets available");
     return {
       findings: [],
     };
   }
 
-  const unitsByDocument = new Map<string, EvidenceUnit[]>();
-  for (const unit of evidenceUnits) {
-    const list = unitsByDocument.get(unit.document_id) ?? [];
-    list.push(unit);
-    unitsByDocument.set(unit.document_id, list);
-  }
-
-  const batches = Array.from(unitsByDocument.values()).flatMap((documentUnits) =>
-    chunkArray(documentUnits, FINDING_BATCH_SIZE),
-  );
-
-  const extractionErrors: PipelineError[] = [];
-  const batchedFindings = await mapWithConcurrency(
-    batches,
+  const extractionResults = await mapWithConcurrency<ExtractionTarget, TargetExtractionResult>(
+    targets,
     Math.max(1, config.maxConcurrency),
-    async (batch, batchIndex): Promise<Finding[]> => {
-      const unitById = new Map(batch.map((unit) => [unit.unit_id, unit]));
-      const fallbackUnit = batch[0];
-
-      if (!fallbackUnit) return [];
-
+    async (target, targetIndex) => {
       try {
         const requestPayload = {
           model: OPENAI_HELPER_MODEL,
@@ -296,9 +487,19 @@ export async function extractFindingsNode(
             {
               role: "user",
               content: [
-                "Extract atomic findings from these evidence units.",
-                "Never include unsupported claims.",
-                JSON.stringify(toBatchInput(batch), null, 2),
+                "Extract atomic findings from this single source target.",
+                "Use only the provided data, and use supporting_unit_ids from allowed_supporting_unit_ids.",
+                "Always include exactly one holistic/top-level finding with dimensions: [].",
+                "When metadata_tag_value_options is provided, ensure each listed tag/value option appears in at least one finding dimension.",
+                "When valid_metadata_fields is provided, treat it as the reusable metadata dimension allow-list.",
+                "Do not drop findings solely because a dimension is outside valid_metadata_fields.",
+                JSON.stringify(
+                  buildTargetInput(target, {
+                    validMetadataFields: validMetadataFieldList,
+                  }),
+                  null,
+                  2,
+                ),
               ].join("\n\n"),
             },
           ],
@@ -313,32 +514,45 @@ export async function extractFindingsNode(
         } satisfies Parameters<typeof openai.chat.completions.create>[0];
 
         const response = await openai.chat.completions.create(requestPayload);
-
         const content = response.choices[0]?.message?.content;
         if (!content) throw new Error("Empty OpenAI response.");
 
         const parsed = JSON.parse(content) as FindingExtractionResponse;
-        return normalizeModelFindings(parsed, unitById, fallbackUnit);
+        const normalized = normalizeModelFindingsForTarget(
+          parsed,
+          target,
+          {
+            validMetadataFields,
+          },
+        );
+
+        return { findings: normalized.findings };
       } catch (error) {
-        extractionErrors.push({
+        const extractionError: PipelineError = {
           stage: "finding-extraction",
           message: error instanceof Error ? error.message : "Unknown error",
-          document_id: fallbackUnit.document_id,
+          document_id: target.document_id,
           cause: error,
+        };
+        console.warn("[finding-extraction] target failed", {
+          targetIndex,
+          target_id: target.target_id,
+          source_modality: target.source_modality,
+          document_id: target.document_id,
+          message: extractionError.message,
         });
-        console.warn("[finding-extraction] batch failed", {
-          batchIndex,
-          document_id: fallbackUnit.document_id,
-          units: batch.length,
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-        return [];
+        return { findings: [], error: extractionError };
       }
     },
   );
 
+  const extractionErrors: PipelineError[] = extractionResults
+    .map((result) => result.error)
+    .filter((error): error is PipelineError => Boolean(error));
+  const collectedFindings: Finding[] = extractionResults.flatMap((result) => result.findings);
+
   const findingsById = new Map<string, Finding>();
-  for (const finding of batchedFindings.flat()) {
+  for (const finding of collectedFindings) {
     const existing = findingsById.get(finding.finding_id);
     if (!existing) {
       findingsById.set(finding.finding_id, finding);
@@ -364,7 +578,7 @@ export async function extractFindingsNode(
   }));
 
   console.info("[finding-extraction] completed", {
-    evidenceUnits: evidenceUnits.length,
+    targets: targets.length,
     findings: findings.length,
     tableFindings: findings.filter((finding) => finding.source_modality === "table").length,
     textFindings: findings.filter((finding) => finding.source_modality === "text").length,

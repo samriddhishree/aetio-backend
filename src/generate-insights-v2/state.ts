@@ -1,5 +1,6 @@
 import { Annotation } from "@langchain/langgraph";
 import type {
+  DimensionMetadata,
   Finding,
   GenerateInsightsV2State,
   InsightFamily,
@@ -44,6 +45,7 @@ export const GenerateInsightsV2StateAnnotation = Annotation.Root({
   findings: Annotation<Finding[]>({ value: overwrite, default: () => [] }),
   validatedFindings: Annotation<Finding[]>({ value: overwrite, default: () => [] }),
   metadataFilters: Annotation<string[]>({ value: overwrite, default: () => [] }),
+  dimensionMetadata: Annotation<DimensionMetadata[]>({ value: overwrite, default: () => [] }),
   insightFamilies: Annotation<InsightFamily[]>({ value: overwrite, default: () => [] }),
   insightRows: Annotation<InsightInstanceRow[]>({ value: overwrite, default: () => [] }),
   insightFamilyData: Annotation<InsightFamilyData[]>({ value: overwrite, default: () => [] }),
@@ -51,6 +53,9 @@ export const GenerateInsightsV2StateAnnotation = Annotation.Root({
     { created: number; updated: number; deleted: number } | undefined
   >({ value: overwrite, default: () => undefined }),
   persistedInsightFamilyDataCounts: Annotation<
+    { created: number; updated: number; deleted: number } | undefined
+  >({ value: overwrite, default: () => undefined }),
+  persistedDimensionMetadataCounts: Annotation<
     { created: number; updated: number; deleted: number } | undefined
   >({ value: overwrite, default: () => undefined }),
   errors: Annotation<PipelineError[]>({ value: mergeArray, default: () => [] }),
@@ -91,10 +96,12 @@ export const emptyGenerateInsightsV2State = (
   findings: [],
   validatedFindings: [],
   metadataFilters: [],
+  dimensionMetadata: [],
   insightFamilies: [],
   insightRows: [],
   insightFamilyData: [],
   persistedFamilyCounts: undefined,
   persistedInsightFamilyDataCounts: undefined,
+  persistedDimensionMetadataCounts: undefined,
   errors: [],
 });

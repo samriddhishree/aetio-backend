@@ -1,17 +1,99 @@
 import { validateInsightFamilyData } from "../services/insightFamilyDataBuilder";
+import {
+  createDimensionMetadataRegistry,
+  getOrCreateDimensionMetadata,
+  listDimensionMetadata,
+  normalizeDimensionName,
+} from "../services/metadataService";
 import type {
+  DimensionMetadata,
   GenerateInsightsV2State,
   InsightFamily,
   InsightFamilyData,
 } from "../types";
 
+function alignRowsToMetadata(
+  table: InsightFamilyData,
+  metadataById: Map<string, DimensionMetadata>,
+  metadataByName: Map<string, DimensionMetadata>,
+): InsightFamilyData {
+  const requiredDimensions = new Set(
+    table.dimensions.map((dimension) => normalizeDimensionName(dimension)),
+  );
+
+  const alignedRows = table.rows
+    .map((row) => {
+      const seenDimensions = new Set<string>();
+      const alignedFilterValues = row.filter_values
+        .map((entry) => {
+          const canonicalName = normalizeDimensionName(entry.dimension_name);
+          if (!canonicalName || !requiredDimensions.has(canonicalName)) return null;
+          if (seenDimensions.has(canonicalName)) return null;
+          seenDimensions.add(canonicalName);
+
+          const metadata =
+            (entry.dimension_id ? metadataById.get(entry.dimension_id) : undefined) ??
+            metadataByName.get(canonicalName);
+          if (!metadata) return null;
+
+          const matchedValue = (metadata.allowed_values ?? []).find(
+            (value) =>
+              (entry.value_id && value.value_id === entry.value_id) ||
+              value.canonical_value === entry.value ||
+              value.display_value === entry.display_value,
+          );
+
+          return {
+            dimension_id: metadata.dimension_id,
+            dimension_name: metadata.canonical_name,
+            value_id: matchedValue?.value_id ?? entry.value_id,
+            value: matchedValue?.canonical_value ?? entry.value,
+            display_value: matchedValue?.display_value ?? entry.display_value ?? entry.value,
+          };
+        })
+        .filter(
+          (
+            entry,
+          ): entry is InsightFamilyData["rows"][number]["filter_values"][number] => Boolean(entry),
+        );
+
+      if (alignedFilterValues.length !== requiredDimensions.size) return null;
+      return {
+        ...row,
+        filter_values: alignedFilterValues,
+      };
+    })
+    .filter((row): row is InsightFamilyData["rows"][number] => Boolean(row));
+
+  return {
+    ...table,
+    rows: alignedRows,
+    row_count: alignedRows.length,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 export async function validateInsightFamilyDataNode(
   state: GenerateInsightsV2State,
 ): Promise<Partial<GenerateInsightsV2State>> {
-  console.info("[insightfamilydata] validation node starting", {
+  console.info("[family-data] validation node starting", {
     families: state.insightFamilies.length,
     tables: state.insightFamilyData.length,
+    dimensionMetadata: state.dimensionMetadata.length,
   });
+
+  const metadataRegistry = createDimensionMetadataRegistry(state.dimensionMetadata);
+  for (const table of state.insightFamilyData) {
+    for (const dimension of table.dimensions) {
+      getOrCreateDimensionMetadata(metadataRegistry, { dimensionName: dimension });
+    }
+  }
+
+  const dimensionMetadata = listDimensionMetadata(metadataRegistry);
+  const metadataById = new Map(dimensionMetadata.map((metadata) => [metadata.dimension_id, metadata]));
+  const metadataByName = new Map(
+    dimensionMetadata.map((metadata) => [metadata.canonical_name, metadata]),
+  );
 
   const tableById = new Map(state.insightFamilyData.map((table) => [table.table_id, table]));
   const fallbackTableByFamily = new Map<string, InsightFamilyData>();
@@ -49,7 +131,7 @@ export async function validateInsightFamilyDataNode(
     if (!candidateTable) {
       invalidTables += 1;
       nonTabularFamilies += 1;
-      console.warn("[insightfamilydata] missing table for tabular family; marking non-tabular", {
+      console.warn("[family-data] missing table for tabular family; marking non-tabular", {
         family_id: family.family_id,
         insight_family_data_id: family.insight_family_data_id,
       });
@@ -64,11 +146,17 @@ export async function validateInsightFamilyDataNode(
       continue;
     }
 
-    const result = validateInsightFamilyData(candidateTable, 0.7);
+    const tableWithMetadataAlignedRows = alignRowsToMetadata(
+      candidateTable,
+      metadataById,
+      metadataByName,
+    );
+
+    const result = validateInsightFamilyData(tableWithMetadataAlignedRows, 0.7);
     if (!result.valid || !result.table) {
       invalidTables += 1;
       nonTabularFamilies += 1;
-      console.warn("[insightfamilydata] table validation failed; marking family non-tabular", {
+      console.warn("[family-data] table validation failed; marking family non-tabular", {
         family_id: family.family_id,
         table_id: candidateTable.table_id,
         errors: result.errors,
@@ -102,18 +190,20 @@ export async function validateInsightFamilyDataNode(
 
   const rows = validatedTables.flatMap((table) => table.rows);
 
-  console.info("[insightfamilydata] validation node completed", {
+  console.info("[family-data] validation node completed", {
     families: validatedFamilies.length,
     validatedTables: validatedTables.length,
     invalidTables,
     repairedTables,
     nonTabularFamilies,
     rows: rows.length,
+    dimensionMetadata: dimensionMetadata.length,
   });
 
   return {
     insightFamilies: validatedFamilies,
     insightFamilyData: validatedTables,
     insightRows: rows,
+    dimensionMetadata,
   };
 }

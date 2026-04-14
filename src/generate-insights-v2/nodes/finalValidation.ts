@@ -1,4 +1,5 @@
 import type { GenerateInsightsV2State, InsightFamily, InsightInstanceRow } from "../types";
+import { normalizeDimensionName } from "../services/metadataService";
 
 function hasEvidenceRef(row: InsightInstanceRow): boolean {
   return row.supporting_refs.some((ref) => Boolean(ref.chunk_id || ref.table_id));
@@ -87,7 +88,7 @@ function hasMultipleSegmentValues(
 
   for (const finding of supportingFindings) {
     for (const dimension of finding.dimensions ?? []) {
-      const tag = normalizeKey(dimension.tag);
+      const tag = normalizeDimensionName(dimension.tag);
       if (!tag || !family.filters.includes(tag)) continue;
       const value = normalizeKey(dimension.value);
       if (!value) continue;
@@ -111,7 +112,7 @@ function isOverlyNarrowFamilyText(
   const tagToValues = new Map<string, Set<string>>();
   for (const finding of supportingFindings) {
     for (const dimension of finding.dimensions ?? []) {
-      const tag = normalizeKey(dimension.tag);
+      const tag = normalizeDimensionName(dimension.tag);
       if (!tag || !family.filters.includes(tag)) continue;
       const value = normalizeKey(dimension.value);
       if (!value) continue;
@@ -248,12 +249,12 @@ export async function finalValidationNode(
     const availableTags = new Set<string>();
     for (const finding of supportingFindings) {
       for (const dimension of finding.dimensions ?? []) {
-        availableTags.add(dimension.tag.trim().toLowerCase());
+        availableTags.add(normalizeDimensionName(dimension.tag));
       }
     }
 
     const groundedFilters = family.filters.filter((filter) =>
-      availableTags.has(filter.trim().toLowerCase()),
+      availableTags.has(normalizeDimensionName(filter)),
     );
 
     const linkedTable =
@@ -310,6 +311,7 @@ export async function finalValidationNode(
 
     const completedFamily: InsightFamily = {
       ...family,
+      insight_id: family.insight_id ?? family.family_id,
       family_text: familyText,
       question_answered: questionAnswered,
       user_info: familyUserInfo,

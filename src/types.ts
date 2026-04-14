@@ -54,8 +54,12 @@ export type Insight = {
   evidence_snippet: string;
   supporting_chunks?: SupportingChunkRef[];
   findings?: FindingRef[];
+  sub_insights?: InsightSubInsight[];
   metadata?: InsightMetadataEntry[];
   confidence?: InsightConfidence;
+  footnote?: string;
+  preloaded_project_insights?: Insight[];
+  // Legacy field kept for backwards compatibility with older records.
   additional_refs?: unknown;
   user_id?: string;
   user_info?: UserInfo;
@@ -133,6 +137,17 @@ export type FindingRef = {
   comparison?: string;
   segment?: string;
   timeframe?: string;
+};
+
+export type InsightSubInsight = {
+  finding_id: string;
+  text: string;
+  metric_value?: string | number;
+  metric_unit?: string;
+  dimensions?: Array<{ tag: string; value: string }>;
+  confidence?: number;
+  source_modality?: "text" | "table";
+  top_level_group_id?: string;
 };
 
 export type PipelineError = {

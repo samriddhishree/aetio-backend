@@ -1,3 +1,9 @@
+/**
+ * DEPRECATED / UNUSED: generate-insights-v1 graph.
+ * Disabled as of 2026-04-11 in favor of generate-insights-v2.
+ * Do not modify this file in the future unless explicitly reactivating v1.
+ */
+
 import { Annotation, StateGraph } from "@langchain/langgraph";
 import type {
   Chunk,

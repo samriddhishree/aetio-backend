@@ -3,19 +3,17 @@ import type {
   Finding,
   InsightFamily,
   InsightFamilyDataRow,
-  MetadataDimension,
   SupportingRef,
 } from "../types";
+import type { DimensionMetadataRegistry } from "../services/metadataService";
+import {
+  getOrCreateDimensionMetadata,
+  getOrCreateDimensionValueMetadata,
+  normalizeDimensionName,
+} from "../services/metadataService";
 
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function normalizeTag(value: string): string {
-  return normalizeText(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9_\- ]+/g, "")
-    .replace(/\s+/g, "_");
 }
 
 function dedupeRefs(refs: SupportingRef[]): SupportingRef[] {
@@ -73,35 +71,89 @@ function buildMeasureValue(finding: Finding): string {
   return normalizeText(finding.text).slice(0, 140);
 }
 
+function isUnknownLike(value: string): boolean {
+  const normalized = normalizeText(value).toLowerCase();
+  return (
+    normalized.length === 0 ||
+    normalized === "unknown" ||
+    normalized === "n/a" ||
+    normalized === "na" ||
+    normalized === "not_available" ||
+    normalized === "not available"
+  );
+}
+
 function resolveFilterValues(
   finding: Finding,
   dimensions: string[],
-): MetadataDimension[] | null {
+  metadataRegistry: DimensionMetadataRegistry,
+): InsightFamilyDataRow["filter_values"] | null {
   if (dimensions.length === 0) return [];
-  if (dimensions.length === 1 && dimensions[0] === "measure") {
-    return [{ tag: "measure", value: buildMeasureValue(finding) }];
+  const hasSourceContext = (finding.dimensions ?? []).length > 0;
+
+  const dimensionMap = new Map<string, string>();
+  for (const dimension of finding.dimensions ?? []) {
+    const canonicalName = normalizeDimensionName(dimension.tag);
+    if (!canonicalName) continue;
+    if (!dimensionMap.has(canonicalName)) {
+      dimensionMap.set(canonicalName, normalizeText(dimension.value));
+    }
   }
 
-  const dimensionMap = new Map(
-    (finding.dimensions ?? []).map((dimension) => [normalizeTag(dimension.tag), dimension.value]),
+  const filterValues = dimensions.map((dimensionName) => {
+    const sourceMeasureValue = dimensionMap.get("measure");
+    const rawValue =
+      dimensionName === "measure"
+        ? sourceMeasureValue ?? buildMeasureValue(finding)
+        : dimensionMap.get(dimensionName) ?? (hasSourceContext ? "" : "Unknown");
+
+    if (hasSourceContext && dimensionName !== "measure" && isUnknownLike(rawValue)) {
+      return null;
+    }
+
+    const dimensionMetadata = getOrCreateDimensionMetadata(metadataRegistry, {
+      dimensionName,
+    });
+    const valueMetadata = getOrCreateDimensionValueMetadata(metadataRegistry, {
+      dimensionName: dimensionMetadata.canonical_name,
+      dimensionId: dimensionMetadata.dimension_id,
+      rawValue,
+    });
+
+    return {
+      dimension_id: dimensionMetadata.dimension_id,
+      dimension_name: dimensionMetadata.canonical_name,
+      value_id: valueMetadata.value.value_id,
+      value: valueMetadata.value.canonical_value,
+      display_value: valueMetadata.value.display_value,
+    };
+  });
+
+  if (filterValues.some((entry) => !entry)) return null;
+  const resolved = filterValues.filter(
+    (entry): entry is NonNullable<(typeof filterValues)[number]> => Boolean(entry),
   );
 
-  const filterValues = dimensions
-    .map((tag) => {
-      const value = dimensionMap.get(tag);
-      return value ? { tag, value: normalizeText(value) } : null;
-    })
-    .filter((value): value is MetadataDimension => Boolean(value));
+  const sourceNonMeasureDimensions = Array.from(dimensionMap.keys()).filter(
+    (dimensionName) => dimensionName !== "measure",
+  );
+  const includesNonMeasureDimension = resolved.some((entry) => entry.dimension_name !== "measure");
 
-  if (filterValues.length !== dimensions.length) return null;
-  return filterValues;
+  // Do not persist metric-only rows when source row context exists.
+  if (hasSourceContext && sourceNonMeasureDimensions.length > 0 && !includesNonMeasureDimension) {
+    return null;
+  }
+
+  return resolved;
 }
 
 export function buildRowIdentity(row: InsightFamilyDataRow): string {
   const filterKey = row.filter_values
     .slice()
-    .sort((left, right) => left.tag.localeCompare(right.tag))
-    .map((filterValue) => `${filterValue.tag}:${filterValue.value}`)
+    .sort((left, right) => left.dimension_name.localeCompare(right.dimension_name))
+    .map((filterValue) =>
+      `${filterValue.dimension_id}:${filterValue.value_id ?? filterValue.value}`,
+    )
     .join("|");
   return [
     row.family_id,
@@ -117,8 +169,13 @@ export function mapFindingToInsightFamilyDataRow(input: {
   finding: Finding;
   dimensions: string[];
   metricName: string;
+  metadataRegistry: DimensionMetadataRegistry;
 }): InsightFamilyDataRow | null {
-  const filterValues = resolveFilterValues(input.finding, input.dimensions);
+  const filterValues = resolveFilterValues(
+    input.finding,
+    input.dimensions,
+    input.metadataRegistry,
+  );
   if (!filterValues) return null;
 
   const directMetricValue = input.finding.metric_value;
@@ -135,7 +192,7 @@ export function mapFindingToInsightFamilyDataRow(input: {
   const rowSeed = [
     input.family.family_id,
     input.finding.finding_id,
-    filterValues.map((entry) => `${entry.tag}:${entry.value}`).join("|"),
+    filterValues.map((entry) => `${entry.dimension_id}:${entry.value_id ?? entry.value}`).join("|"),
     metricValue ?? "",
     metricUnit ?? "",
   ].join("|");

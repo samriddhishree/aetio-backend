@@ -23,6 +23,7 @@ describe("toOpenSearchInsightDocument", () => {
     expect(doc.text).toBe("Canonical insight text");
     expect(doc.family_text).toBe("Family-level insight text");
     expect(doc.question_answered).toBe("Which audience converted best?");
+    expect((doc as { rows?: unknown }).rows).toBeUndefined();
   });
 
   it("defaults expires_at to one year after created_at when persisting insight families", () => {

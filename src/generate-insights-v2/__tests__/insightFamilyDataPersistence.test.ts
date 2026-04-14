@@ -14,7 +14,15 @@ describe("insightFamilyDataPersistence", () => {
         {
           row_id: "row-1",
           family_id: "family-1",
-          filter_values: [{ tag: "channel", value: "Email" }],
+          filter_values: [
+            {
+              dimension_id: "dim-channel",
+              dimension_name: "channel",
+              value_id: "val-email",
+              value: "email",
+              display_value: "Email",
+            },
+          ],
           metric_name: "conversion_rate_change",
           value_text: "Email conversion +4%",
           metric_value: 4,

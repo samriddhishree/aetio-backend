@@ -25,11 +25,13 @@ function makeBaseState(): GenerateInsightsV2State {
     findings: [],
     validatedFindings: [],
     metadataFilters: [],
+    dimensionMetadata: [],
     insightFamilies: [],
     insightRows: [],
     insightFamilyData: [],
     persistedFamilyCounts: undefined,
     persistedInsightFamilyDataCounts: undefined,
+    persistedDimensionMetadataCounts: undefined,
     errors: [],
   };
 }

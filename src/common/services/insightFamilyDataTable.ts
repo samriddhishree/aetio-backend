@@ -22,11 +22,19 @@ export type PersistedInsightFamilyData = {
   row_count: number;
   dimensions: string[];
   metric_columns: string[];
+  table_markdown?: string;
+  table_text_chunk?: string;
   source_modalities: Array<"text" | "table" | "image">;
   rows: Array<{
     row_id: string;
     family_id: string;
-    filter_values: Array<{ tag: string; value: string }>;
+    filter_values: Array<{
+      dimension_id: string;
+      dimension_name: string;
+      value_id?: string;
+      value: string;
+      display_value?: string;
+    }>;
     metric_name?: string;
     value_text: string;
     metric_value?: string | number;

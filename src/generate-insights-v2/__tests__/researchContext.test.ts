@@ -62,11 +62,13 @@ function makeState(): GenerateInsightsV2State {
       },
     ],
     metadataFilters: ["channel", "age_group"],
+    dimensionMetadata: [],
     insightFamilies: [],
     insightRows: [],
     insightFamilyData: [],
     persistedFamilyCounts: undefined,
     persistedInsightFamilyDataCounts: undefined,
+    persistedDimensionMetadataCounts: undefined,
     errors: [],
   };
 }

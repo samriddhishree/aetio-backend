@@ -2,6 +2,7 @@ import {
   buildInsightFamilyDataFromFindings,
 } from "../services/insightFamilyDataBuilder";
 import type {
+  DimensionMetadata,
   GenerateInsightsV2State,
   InsightFamily,
   InsightFamilyData,
@@ -11,7 +12,7 @@ import type {
 export async function buildInsightFamilyDataNode(
   state: GenerateInsightsV2State,
 ): Promise<Partial<GenerateInsightsV2State>> {
-  console.info("[insightfamilydata] build node starting", {
+  console.info("[family-data] build node starting", {
     families: state.insightFamilies.length,
     findings: state.validatedFindings.length,
   });
@@ -20,6 +21,7 @@ export async function buildInsightFamilyDataNode(
   const updatedFamilies: InsightFamily[] = [];
   const insightFamilyData: InsightFamilyData[] = [];
   const insightRows: InsightInstanceRow[] = [];
+  let dimensionMetadata: DimensionMetadata[] = state.dimensionMetadata;
 
   let totalDroppedDuplicateRows = 0;
   let tabularFamilies = 0;
@@ -33,8 +35,12 @@ export async function buildInsightFamilyDataNode(
     const result = buildInsightFamilyDataFromFindings({
       family,
       findings: supportingFindings,
+      existingDimensionMetadata: dimensionMetadata,
+      normalizedChunks: state.chunks,
+      normalizedTables: state.tables,
     });
 
+    dimensionMetadata = result.dimensionMetadata;
     updatedFamilies.push(result.family);
     totalDroppedDuplicateRows += result.droppedDuplicateRows;
 
@@ -42,7 +48,7 @@ export async function buildInsightFamilyDataNode(
       tabularFamilies += 1;
       insightFamilyData.push(result.insightFamilyData);
       insightRows.push(...result.insightFamilyData.rows);
-      console.info("[insightfamilydata] family inferred as tabular", {
+      console.info("[family-data] family inferred as tabular", {
         family_id: family.family_id,
         table_id: result.insightFamilyData.table_id,
         dimensions: result.insightFamilyData.dimensions,
@@ -52,25 +58,27 @@ export async function buildInsightFamilyDataNode(
       });
     } else {
       narrativeFamilies += 1;
-      console.info("[insightfamilydata] family marked non-tabular", {
+      console.info("[family-data] family marked non-tabular", {
         family_id: family.family_id,
         tabularity_confidence: result.tabularity_confidence,
       });
     }
   }
 
-  console.info("[insightfamilydata] build node completed", {
+  console.info("[family-data] build node completed", {
     families: state.insightFamilies.length,
     tabularFamilies,
     narrativeFamilies,
     tables: insightFamilyData.length,
     rows: insightRows.length,
     droppedDuplicateRows: totalDroppedDuplicateRows,
+    metadataDimensions: dimensionMetadata.length,
   });
 
   return {
     insightFamilies: updatedFamilies,
     insightFamilyData,
     insightRows,
+    dimensionMetadata,
   };
 }

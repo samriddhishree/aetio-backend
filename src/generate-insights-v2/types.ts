@@ -16,6 +16,49 @@ export type MetadataDimension = {
   value: string;
 };
 
+export type DimensionValueMetadata = {
+  value_id: string;
+  canonical_value: string;
+  display_value: string;
+  description?: string;
+  synonyms?: string[];
+  parent_value_id?: string | null;
+  sort_order?: number;
+  is_other?: boolean;
+  is_unknown?: boolean;
+  raw_source_values?: string[];
+};
+
+export type DimensionMetadata = {
+  dimension_id: string;
+  canonical_name: string;
+  display_name: string;
+  description?: string;
+  parent_dimension_id?: string | null;
+  level?: number;
+  dimension_type:
+    | "categorical"
+    | "temporal"
+    | "geographic"
+    | "ordinal"
+    | "numeric_bucket"
+    | "boolean"
+    | "entity";
+  value_type:
+    | "string"
+    | "number"
+    | "date"
+    | "datetime"
+    | "boolean";
+  synonyms?: string[];
+  aliases?: string[];
+  allowed_values?: DimensionValueMetadata[];
+  tags?: string[];
+  status?: "active" | "deprecated";
+  created_at: string;
+  updated_at: string;
+};
+
 export type SupportingRef = {
   chunk_id?: string;
   table_id?: string;
@@ -32,6 +75,7 @@ export type SupportingRef = {
 
 export type Finding = {
   finding_id: string;
+  top_level_group_id?: string;
   text: string;
   metric_value?: string | number;
   metric_unit?: string;
@@ -42,10 +86,16 @@ export type Finding = {
 };
 
 export type InsightFamily = {
+  insight_id?: string;
   family_id: string;
   family_text: string;
   question_answered: string;
   user_info?: UserInfo;
+  user_id?: string;
+  project_id?: string;
+  organization_id?: string;
+  document_ids?: string[];
+  source_types?: string[];
   created_at?: string;
   expires_at?: string;
   filters: string[];
@@ -61,7 +111,13 @@ export type InsightFamily = {
 export type InsightInstanceRow = {
   row_id: string;
   family_id: string;
-  filter_values: MetadataDimension[];
+  filter_values: Array<{
+    dimension_id: string;
+    dimension_name: string;
+    value_id?: string;
+    value: string;
+    display_value?: string;
+  }>;
   metric_name?: string;
   value_text: string;
   metric_value?: string | number;
@@ -78,6 +134,8 @@ export type InsightFamilyData = {
   metric_columns: string[];
   row_count: number;
   rows: InsightFamilyDataRow[];
+  table_markdown?: string;
+  table_text_chunk?: string;
   source_modalities?: Array<"text" | "table" | "image">;
   created_at: string;
   updated_at: string;
@@ -99,6 +157,18 @@ export type GenerateInsightsV2Response = {
   insight_families: InsightFamily[];
   insight_rows: InsightInstanceRow[];
   insight_family_data: InsightFamilyData[];
+  dimension_metadata: DimensionMetadata[];
+};
+
+export type GenerateInsightsV2MetadataPrepassResponse = {
+  documents: Array<{
+    document_id: string;
+    source_uri: string;
+    file_type: string;
+  }>;
+  tables: V2Table[];
+  metadata_filters: string[];
+  dimension_metadata: DimensionMetadata[];
 };
 
 export type V2DocumentDescriptor = {
@@ -182,6 +252,7 @@ export type GenerateInsightsV2State = {
   findings: Finding[];
   validatedFindings: Finding[];
   metadataFilters: string[];
+  dimensionMetadata: DimensionMetadata[];
   insightFamilies: InsightFamily[];
   insightRows: InsightInstanceRow[];
   insightFamilyData: InsightFamilyData[];
@@ -191,6 +262,11 @@ export type GenerateInsightsV2State = {
     deleted: number;
   };
   persistedInsightFamilyDataCounts?: {
+    created: number;
+    updated: number;
+    deleted: number;
+  };
+  persistedDimensionMetadataCounts?: {
     created: number;
     updated: number;
     deleted: number;

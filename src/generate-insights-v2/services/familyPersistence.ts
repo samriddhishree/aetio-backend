@@ -1,4 +1,4 @@
-import type { Insight, InsightMetadataEntry } from "../../types";
+import type { Insight, InsightMetadataEntry, InsightSubInsight } from "../../types";
 import {
   deleteInsightById,
   listInsights,
@@ -53,6 +53,7 @@ export type BuildPersistedInsightFamilyInput = {
   scopeS3Node: string;
   primaryDocumentId: string;
   metadata?: InsightMetadataEntry[];
+  subInsights?: InsightSubInsight[];
 };
 
 export type SyncSearchableInsightFamiliesInput = {
@@ -73,11 +74,6 @@ function compact(value: string): string {
 
 function uniqueStrings(items: string[]): string[] {
   return Array.from(new Set(items.map((item) => compact(item)).filter(Boolean)));
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
 }
 
 function toIsoOrUndefined(value: unknown): string | undefined {
@@ -115,13 +111,55 @@ function buildSearchableText(input: {
 }
 
 function normalizeMetadata(metadata: InsightMetadataEntry[] | undefined): InsightMetadataEntry[] {
-  return (metadata ?? [])
-    .map((entry) => ({
-      tag: compact(entry.tag),
-      value: compact(entry.value),
+  const normalized: InsightMetadataEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of metadata ?? []) {
+    const tag = compact(entry.tag);
+    const value = compact(entry.value);
+    if (!tag || !value) continue;
+
+    const key = `${tag.toLowerCase()}::${value.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    normalized.push({
+      tag,
+      value,
       ...(typeof entry.confidence === "number" ? { confidence: entry.confidence } : {}),
-    }))
-    .filter((entry) => entry.tag.length > 0 && entry.value.length > 0);
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeSubInsights(subInsights: InsightSubInsight[] | undefined): InsightSubInsight[] {
+  return (subInsights ?? [])
+    .map((subInsight) => {
+      const dimensions =
+        Array.isArray(subInsight.dimensions) && subInsight.dimensions.length > 0
+          ? subInsight.dimensions
+              .map((dimension) => ({
+                tag: compact(dimension.tag),
+                value: compact(dimension.value),
+              }))
+              .filter((dimension) => dimension.tag.length > 0 && dimension.value.length > 0)
+          : undefined;
+
+      return {
+        finding_id: compact(subInsight.finding_id),
+        text: compact(subInsight.text),
+        ...(subInsight.metric_value !== undefined ? { metric_value: subInsight.metric_value } : {}),
+        ...(subInsight.metric_unit ? { metric_unit: compact(subInsight.metric_unit) } : {}),
+        ...(dimensions && dimensions.length > 0 ? { dimensions } : {}),
+        ...(typeof subInsight.confidence === "number" ? { confidence: subInsight.confidence } : {}),
+        ...(subInsight.source_modality ? { source_modality: subInsight.source_modality } : {}),
+        ...(subInsight.top_level_group_id
+          ? { top_level_group_id: compact(subInsight.top_level_group_id) }
+          : {}),
+      };
+    })
+    .filter((subInsight) => subInsight.finding_id.length > 0 && subInsight.text.length > 0);
 }
 
 export function buildFamilyPersistenceScope(input: {
@@ -141,7 +179,6 @@ export function buildFamilyPersistenceScope(input: {
 }
 
 export function toOpenSearchInsightDocument(insight: Insight): SearchInsightDocument {
-  const refs = asRecord(insight.additional_refs);
   const createdAt = toIsoOrUndefined(insight.created_at) ?? toIsoOrUndefined(insight.createdAt);
   const updatedAt = toIsoOrUndefined(insight.updated_at) ?? toIsoOrUndefined(insight.updatedAt);
   const expiresAt = toIsoOrUndefined(insight.expires_at) ?? toIsoOrUndefined(insight.expiresAt);
@@ -152,68 +189,31 @@ export function toOpenSearchInsightDocument(insight: Insight): SearchInsightDocu
   const questionAnswered =
     typeof insight.question_answered === "string" && insight.question_answered.trim().length > 0
       ? compact(insight.question_answered)
-      : typeof refs.question_answered === "string"
-        ? compact(refs.question_answered)
-        : "";
+      : "";
 
-  const summary =
-    typeof insight.summary === "string"
-      ? compact(insight.summary)
-      : typeof refs.family_summary === "string"
-        ? compact(refs.family_summary)
-        : undefined;
+  const summary = typeof insight.summary === "string" ? compact(insight.summary) : undefined;
 
-  const filters = Array.isArray(insight.filters)
-    ? uniqueStrings(insight.filters)
-    : Array.isArray(refs.filters)
-      ? uniqueStrings(refs.filters.filter((value): value is string => typeof value === "string"))
-      : [];
+  const filters = Array.isArray(insight.filters) ? uniqueStrings(insight.filters) : [];
 
-  const documentIds = Array.isArray(insight.document_ids)
-    ? uniqueStrings(insight.document_ids)
-    : Array.isArray(refs.document_ids)
-      ? uniqueStrings(refs.document_ids.filter((value): value is string => typeof value === "string"))
-      : [];
+  const documentIds = Array.isArray(insight.document_ids) ? uniqueStrings(insight.document_ids) : [];
 
-  const sourceTypes = Array.isArray(insight.source_types)
-    ? uniqueStrings(insight.source_types)
-    : Array.isArray(refs.source_types)
-      ? uniqueStrings(refs.source_types.filter((value): value is string => typeof value === "string"))
-      : [];
+  const sourceTypes = Array.isArray(insight.source_types) ? uniqueStrings(insight.source_types) : [];
 
-  const hasGrid = typeof insight.has_grid === "boolean"
-    ? insight.has_grid
-    : typeof refs.has_grid === "boolean"
-      ? refs.has_grid
-      : undefined;
+  const hasGrid = typeof insight.has_grid === "boolean" ? insight.has_grid : undefined;
 
   const insightFamilyDataId = typeof insight.insight_family_data_id === "string"
     ? compact(insight.insight_family_data_id)
-    : typeof refs.insight_family_data_id === "string"
-      ? compact(refs.insight_family_data_id)
-      : undefined;
+    : undefined;
 
-  const rowCount = typeof insight.row_count === "number"
-    ? insight.row_count
-    : typeof refs.row_count === "number"
-      ? refs.row_count
-      : undefined;
+  const rowCount = typeof insight.row_count === "number" ? insight.row_count : undefined;
 
   const tableDimensions = Array.isArray(insight.table_dimensions)
     ? uniqueStrings(insight.table_dimensions)
-    : Array.isArray(refs.table_dimensions)
-      ? uniqueStrings(
-          refs.table_dimensions.filter((value): value is string => typeof value === "string"),
-        )
-      : [];
+    : [];
 
   const metricColumns = Array.isArray(insight.metric_columns)
     ? uniqueStrings(insight.metric_columns)
-    : Array.isArray(refs.metric_columns)
-      ? uniqueStrings(
-          refs.metric_columns.filter((value): value is string => typeof value === "string"),
-        )
-      : [];
+    : [];
 
   const searchableText = buildSearchableText({
     familyText,
@@ -263,7 +263,7 @@ export function buildPersistedInsightFamilyRecord(
   const metricColumns = uniqueStrings(input.family.metric_columns ?? []);
 
   const insight: Insight = {
-    insight_id: input.family.family_id,
+    insight_id: input.family.insight_id ?? input.family.family_id,
     object_type: "insight_family",
     text: input.family.family_text,
     family_text: input.family.family_text,
@@ -281,6 +281,7 @@ export function buildPersistedInsightFamilyRecord(
     source_types: sourceTypes,
     filters,
     metadata: normalizeMetadata(input.metadata),
+    sub_insights: normalizeSubInsights(input.subInsights),
     project_id: input.projectId,
     user_id: input.userId,
     user_info: input.family.user_info,
@@ -292,23 +293,6 @@ export function buildPersistedInsightFamilyRecord(
     updatedAt: now,
     expires_at: expiresAt,
     expiresAt: expiresAt,
-    additional_refs: {
-      object_type: "insight_family",
-      question_answered: input.family.question_answered,
-      family_summary: input.family.summary,
-      filters,
-      has_grid: input.family.has_grid ?? false,
-      insight_family_data_id: input.family.insight_family_data_id,
-      row_count: input.family.row_count,
-      table_dimensions: tableDimensions,
-      metric_columns: metricColumns,
-      supporting_finding_ids: input.family.supporting_finding_ids,
-      document_ids: documentIds,
-      source_types: sourceTypes,
-      scope_s3_node: input.scopeS3Node,
-      created_at: createdAt,
-      expires_at: expiresAt,
-    },
   };
 
   return {
@@ -320,8 +304,7 @@ export function buildPersistedInsightFamilyRecord(
 export async function createSearchableInsightFamily(
   record: PersistedInsightFamilyRecord,
 ): Promise<void> {
-  console.info("[persist-family] creating family", {
-    insight_id: record.insight.insight_id,
+  console.info(`[family] persisted family ${record.insight.insight_id}`, {
     project_id: record.insight.project_id,
     user_id: record.insight.user_id,
   });
@@ -348,8 +331,7 @@ export async function createSearchableInsightFamily(
 export async function updateSearchableInsightFamily(
   record: PersistedInsightFamilyRecord,
 ): Promise<void> {
-  console.info("[persist-family] updating family", {
-    insight_id: record.insight.insight_id,
+  console.info(`[family] persisted family ${record.insight.insight_id}`, {
     project_id: record.insight.project_id,
     user_id: record.insight.user_id,
   });
@@ -363,7 +345,7 @@ export async function updateSearchableInsightFamily(
 
   try {
     await upsertInsightDocument(toOpenSearchInsightDocument(updatePayload));
-    console.info("[opensearch-sync] updated family", {
+    console.info("[opensearch-sync] indexed family", {
       insight_id: record.insight.insight_id,
     });
   } catch (error) {
@@ -379,7 +361,7 @@ export async function updateSearchableInsightFamily(
 }
 
 export async function deleteSearchableInsightFamily(insightId: string): Promise<void> {
-  console.info("[persist-family] deleting family", { insight_id: insightId });
+  console.info("[family] deleting family", { insight_id: insightId });
   await deleteInsightById(insightId);
 
   try {

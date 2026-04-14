@@ -70,6 +70,8 @@ export function buildPersistedInsightFamilyDataRecord(
       row_count: input.table.row_count,
       dimensions: input.table.dimensions,
       metric_columns: input.table.metric_columns,
+      table_markdown: input.table.table_markdown,
+      table_text_chunk: input.table.table_text_chunk,
       source_modalities: input.table.source_modalities ?? [],
       project_id: input.projectId,
       user_id: input.userId,
@@ -85,20 +87,24 @@ export function buildPersistedInsightFamilyDataRecord(
 export async function createInsightFamilyData(
   record: PersistedInsightFamilyDataRecord,
 ): Promise<void> {
-  console.info("[insightfamilydata] creating persisted insightfamilydata", {
-    table_id: record.familyData.table_id,
-    family_id: record.familyData.family_id,
-  });
+  console.info(
+    `[family-data] persisted table ${record.familyData.table_id} with ${record.familyData.row_count} rows`,
+    {
+      family_id: record.familyData.family_id,
+    },
+  );
   await putInsightFamilyDataRow(record.familyData);
 }
 
 export async function updateInsightFamilyData(
   record: PersistedInsightFamilyDataRecord,
 ): Promise<void> {
-  console.info("[insightfamilydata] updating persisted insightfamilydata", {
-    table_id: record.familyData.table_id,
-    family_id: record.familyData.family_id,
-  });
+  console.info(
+    `[family-data] persisted table ${record.familyData.table_id} with ${record.familyData.row_count} rows`,
+    {
+      family_id: record.familyData.family_id,
+    },
+  );
   await putInsightFamilyDataRow({
     ...record.familyData,
     updated_at: new Date().toISOString(),
@@ -106,7 +112,7 @@ export async function updateInsightFamilyData(
 }
 
 export async function deleteInsightFamilyData(tableId: string): Promise<void> {
-  console.info("[insightfamilydata] deleting persisted insightfamilydata", { table_id: tableId });
+  console.info("[family-data] deleting persisted table", { table_id: tableId });
   await deleteInsightFamilyDataRow(tableId);
 }
 

@@ -2,10 +2,12 @@ import express, { Request, Response } from "express";
 import cors from 'cors';
 import crypto from "crypto";
 import {
+  generateInsightsV2MetadataPrepassHandler,
   generateInsightsV2Handler,
   type GenerateInsightsV2Arguments,
 } from "./generate-insights-v2/handler";
-import { runIngestionPipelineFromChunks, summarizeProject } from "./generate-insights/graph";
+// NOTE: generate-insights-v1 is intentionally disabled and unused.
+// Do not re-enable or modify v1 paths; use generate-insights-v2 endpoints only.
 import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
   deleteAllInsightsWithInsightIds,
@@ -27,14 +29,25 @@ import {
   deleteInsightDocuments,
   upsertInsightDocument,
 } from "./common/services/elasticsearch";
-import { listProjectsByUserAndStatus } from "./common/services/projectsTable";
+import {
+  deleteAllDimensionMetadata,
+  deleteDimensionMetadataByProjectId,
+  setDimensionMetadataStatusByProjectAndCanonicalNames,
+} from "./common/services/dimensionMetadataTable";
+import {
+  deleteAllProjects,
+  deleteProjectsByProjectId,
+  listProjectsByUserAndStatus,
+  updateProjectCountsByProjectId,
+} from "./common/services/projectsTable";
 import { toOpenSearchInsightDocument } from "./generate-insights-v2/services/familyPersistence";
+import { normalizeDimensionName } from "./generate-insights-v2/services/metadataService";
 
-import type { Chunk, FindingRef, Insight } from "./types";
+import type { FindingRef, Insight, InsightMetadataEntry } from "./types";
 import { config  } from "./common/services/config";
 
-type FormattedInsight = Insight & {
-  sub_insights?: Insight[];
+type FormattedInsight = Omit<Insight, "sub_insights"> & {
+  sub_insights?: Insight["sub_insights"] | Insight[];
 };
 
 const app = express();
@@ -138,22 +151,56 @@ app.get("/projects/:projectId", async (req: Request, res: Response) => {
   }
 
   try {
-    const pendingProjects = await listProjectsByUserAndStatus({
-      userId: jwtUserId,
-      status: "Pending",
-    });
-    const project = pendingProjects.find((entry) => entry.project_id === projectId);
+    const projectStatusCandidates = ["Pending", "Accepted", "Declined", "Completed"];
+    const projectBuckets = await Promise.all(
+      projectStatusCandidates.map((status) =>
+        listProjectsByUserAndStatus({
+          userId: jwtUserId,
+          status,
+        }),
+      ),
+    );
+    const project = projectBuckets
+      .flat()
+      .find((entry) => entry.project_id === projectId);
     if (!project) {
       return res.status(404).json({ error: `Project not found: ${projectId}` });
     }
 
-    const pendingInsights = await listInsights({
-      status: "Pending",
+    const insightStatusCandidates = [
+      "Pending",
+      "Accepted",
+      "Declined",
+      "pending",
+      "accepted",
+      "declined",
+    ];
+    let linkedInsights = await listInsights({
+      status: insightStatusCandidates,
       project_id: projectId,
     });
+    const projectInsightIds = Array.isArray(project.insight_ids)
+      ? project.insight_ids
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+      : [];
+
+    if (linkedInsights.length === 0 && projectInsightIds.length > 0) {
+      const insightsByIds = await listInsights({ insight_id: projectInsightIds });
+      linkedInsights = insightsByIds;
+    }
+
+    const linkedInsightsByKey = new Map<string, Insight>();
+    for (const linkedInsight of linkedInsights) {
+      const key = `${linkedInsight.insight_id}::${linkedInsight.user_id ?? ""}`;
+      linkedInsightsByKey.set(key, linkedInsight);
+    }
+    const dedupedLinkedInsights = Array.from(linkedInsightsByKey.values());
+
     const tableIds = Array.from(
       new Set(
-        pendingInsights
+        dedupedLinkedInsights
           .map((insight) => insight.insight_family_data_id?.trim())
           .filter((tableId): tableId is string => Boolean(tableId)),
       ),
@@ -161,32 +208,32 @@ app.get("/projects/:projectId", async (req: Request, res: Response) => {
     const insightFamilyData = (
       await Promise.all(tableIds.map((tableId) => getInsightFamilyData(tableId)))
     ).filter((value): value is PersistedInsightFamilyData => Boolean(value));
-    const insightFamilyDataById = new Map(
-      insightFamilyData.map((table) => [table.table_id, table]),
-    );
-    const insightsWithFamilyData = pendingInsights.map((pendingInsight) => {
-      const tableId = pendingInsight.insight_family_data_id?.trim();
-      const linkedFamilyData = tableId ? insightFamilyDataById.get(tableId) : undefined;
-      const existingRefs =
-        pendingInsight.additional_refs &&
-        typeof pendingInsight.additional_refs === "object" &&
-        !Array.isArray(pendingInsight.additional_refs)
-          ? (pendingInsight.additional_refs as Record<string, unknown>)
-          : {};
+    const insightsWithFamilyData = dedupedLinkedInsights;
 
-      return {
-        ...pendingInsight,
-        additional_refs: linkedFamilyData
-          ? {
-              ...existingRefs,
-              insight_family_data: linkedFamilyData,
-            }
-          : existingRefs,
-      };
-    });
+    const fallbackCounts = countInsightStatuses(insightsWithFamilyData, projectId);
+    const fallbackNumberChildInsights = new Set(
+      insightsWithFamilyData
+        .filter((entry) => entry.insight_id !== projectId)
+        .map((entry) => entry.insight_id),
+    ).size;
+    const projectWithCounts = {
+      ...project,
+      countAccepted:
+        typeof project.countAccepted === "number"
+          ? project.countAccepted
+          : fallbackCounts.countAccepted,
+      countDeclined:
+        typeof project.countDeclined === "number"
+          ? project.countDeclined
+          : fallbackCounts.countDeclined,
+      numberChildInsights:
+        typeof project.numberChildInsights === "number"
+          ? project.numberChildInsights
+          : fallbackNumberChildInsights,
+    };
 
     return res.status(200).json({
-      project,
+      project: projectWithCounts,
       insights: insightsWithFamilyData,
       insightfamilydata: insightFamilyData,
     });
@@ -201,15 +248,165 @@ const toObjectRecord = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
-const normalizeInsightStatus = (insight: Insight): Insight => ({
-  ...insight,
-  evidence_snippet: insight.evidence_snippet?.trim() || insight.text,
-  status: insight.status?.toLowerCase() === "declined" ? insight.status : "Accepted",
-});
+const compactText = (value: string): string => value.replace(/\s+/g, " ").trim();
 
-const countInsightStatuses = (insights: Insight[]): AcceptStatusCounts =>
+const migrateLegacyAdditionalRefs = (insight: Insight): Insight => {
+  const refs = toObjectRecord(insight.additional_refs);
+  const next: Insight = {
+    ...insight,
+    ...(typeof insight.footnote === "string"
+      ? {}
+      : typeof refs.footnote === "string"
+        ? { footnote: refs.footnote }
+        : {}),
+    ...(typeof insight.createdAt === "string"
+      ? {}
+      : typeof refs.createdAt === "string"
+        ? { createdAt: refs.createdAt }
+        : {}),
+    ...(Array.isArray(insight.preloaded_project_insights)
+      ? {}
+      : Array.isArray(refs.preloaded_project_insights)
+        ? { preloaded_project_insights: refs.preloaded_project_insights as Insight[] }
+        : {}),
+  };
+
+  const withoutLegacyFields = { ...next } as Record<string, unknown>;
+  delete withoutLegacyFields.additional_refs;
+  delete withoutLegacyFields.insightfamilydata;
+  delete withoutLegacyFields.insight_family_data;
+  return withoutLegacyFields as Insight;
+};
+
+const normalizeInsightMetadata = (metadata: unknown): InsightMetadataEntry[] | undefined => {
+  if (!Array.isArray(metadata)) return undefined;
+
+  const normalized: InsightMetadataEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const item of metadata) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+
+    const entry = item as Partial<InsightMetadataEntry>;
+    const tag = typeof entry.tag === "string" ? compactText(entry.tag) : "";
+    const value = typeof entry.value === "string" ? compactText(entry.value) : "";
+    if (!tag || !value) continue;
+
+    const key = `${tag.toLowerCase()}::${value.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    normalized.push({
+      tag,
+      value,
+      ...(typeof entry.confidence === "number" ? { confidence: entry.confidence } : {}),
+    });
+  }
+
+  return normalized;
+};
+
+const normalizeInsightStatus = (insight: Insight): Insight => {
+  const migratedInsight = migrateLegacyAdditionalRefs(insight);
+  const normalizedMetadata = normalizeInsightMetadata(migratedInsight.metadata);
+  return {
+    ...migratedInsight,
+    evidence_snippet: migratedInsight.evidence_snippet?.trim() || migratedInsight.text,
+    status: migratedInsight.status?.toLowerCase() === "declined" ? migratedInsight.status : "Accepted",
+    ...(normalizedMetadata ? { metadata: normalizedMetadata } : {}),
+  };
+};
+
+const isPartialInsightsAcceptRequest = (req: Request): boolean => {
+  if ((req.header("x-insights-partial-update") ?? "").toLowerCase() === "true") {
+    return true;
+  }
+  if (typeof req.query.partial === "string" && req.query.partial.toLowerCase() === "true") {
+    return true;
+  }
+  return false;
+};
+
+const normalizeMetadataTagForDimension = (value: unknown): string => {
+  const compacted = compactText(typeof value === "string" ? value : "");
+  if (!compacted) return "";
+  return normalizeDimensionName(compacted) || compacted.toLowerCase();
+};
+
+const collectMetadataTagsFromInsight = (insight: Insight, target: Set<string>): void => {
+  for (const metadataEntry of insight.metadata ?? []) {
+    const normalizedTag = normalizeMetadataTagForDimension(metadataEntry.tag);
+    if (!normalizedTag) continue;
+    target.add(normalizedTag);
+  }
+};
+
+const collectMetadataTagsFromInsights = (insights: Insight[]): Set<string> => {
+  const tags = new Set<string>();
+  for (const insight of insights) {
+    collectMetadataTagsFromInsight(insight, tags);
+  }
+  return tags;
+};
+
+const listCurrentProjectInsightsForAccept = async (projectId: string): Promise<Insight[]> => {
+  const insightStatusCandidates = [
+    "Pending",
+    "Accepted",
+    "Declined",
+    "Completed",
+    "pending",
+    "accepted",
+    "declined",
+    "completed",
+  ];
+  const [projectInsights, projectRootCandidates] = await Promise.all([
+    listInsights({ status: insightStatusCandidates, project_id: projectId }),
+    listInsights({ insight_id: projectId }),
+  ]);
+
+  const deduped = new Map<string, Insight>();
+  for (const insight of [...projectInsights, ...projectRootCandidates]) {
+    const key = `${insight.insight_id}::${insight.user_id ?? ""}`;
+    deduped.set(key, insight);
+  }
+  return Array.from(deduped.values());
+};
+
+const getRemovedMetadataDimensions = (existing: Set<string>, incoming: Set<string>): string[] =>
+  Array.from(existing).filter((tag) => !incoming.has(tag));
+
+const declineRemovedMetadataDimensions = async (input: {
+  projectId: string;
+  existingMetadataTags: Set<string>;
+  incomingMetadataTags: Set<string>;
+}): Promise<number> => {
+  const removedTags = getRemovedMetadataDimensions(
+    input.existingMetadataTags,
+    input.incomingMetadataTags,
+  );
+  if (removedTags.length === 0) return 0;
+
+  const updatedCount = await setDimensionMetadataStatusByProjectAndCanonicalNames({
+    projectId: input.projectId,
+    canonicalNames: removedTags,
+    status: "Declined",
+  });
+
+  console.info("[insights-accept] metadata dimensions marked Declined", {
+    projectId: input.projectId,
+    removedTags: removedTags.length,
+    updatedCount,
+    removedTagNames: removedTags,
+  });
+
+  return updatedCount;
+};
+
+const countInsightStatuses = (insights: Insight[], projectId?: string): AcceptStatusCounts =>
   insights.reduce<AcceptStatusCounts>(
     (acc, insight) => {
+      if (projectId && insight.insight_id === projectId) return acc;
       const normalizedStatus = insight.status?.toLowerCase();
       if (normalizedStatus === "declined") acc.countDeclined += 1;
       if (normalizedStatus === "accepted") acc.countAccepted += 1;
@@ -218,7 +415,12 @@ const countInsightStatuses = (insights: Insight[]): AcceptStatusCounts =>
     { countAccepted: 0, countDeclined: 0 },
   );
 
-const incrementStatusCounts = (counts: AcceptStatusCounts, insight: Insight): void => {
+const incrementStatusCounts = (
+  counts: AcceptStatusCounts,
+  insight: Insight,
+  projectId?: string,
+): void => {
+  if (projectId && insight.insight_id === projectId) return;
   const normalizedStatus = insight.status?.toLowerCase();
   if (normalizedStatus === "accepted") counts.countAccepted += 1;
   if (normalizedStatus === "declined") counts.countDeclined += 1;
@@ -275,9 +477,12 @@ const extractInsightUpdatePatch = (body: unknown): Partial<Insight> => {
   if (typeof payload.expires_at === "string") patch.expires_at = payload.expires_at;
   if (typeof payload.expiresAt === "string") patch.expiresAt = payload.expiresAt;
   if (typeof payload.summary === "string") patch.summary = payload.summary;
-  if (Array.isArray(payload.metadata)) patch.metadata = payload.metadata;
+  if (Array.isArray(payload.metadata)) patch.metadata = normalizeInsightMetadata(payload.metadata) ?? [];
   if (typeof payload.status === "string") patch.status = payload.status;
-  if ("additional_refs" in payload) patch.additional_refs = payload.additional_refs;
+  if (typeof payload.footnote === "string") patch.footnote = payload.footnote;
+  if (Array.isArray(payload.preloaded_project_insights)) {
+    patch.preloaded_project_insights = payload.preloaded_project_insights;
+  }
   if ("user_info" in payload && payload.user_info && typeof payload.user_info === "object" && !Array.isArray(payload.user_info)) {
     patch.user_info = payload.user_info;
   }
@@ -313,23 +518,17 @@ const extractInsightFamilyDataPatch = (
   return patch;
 };
 
-const addProjectAcceptCountsOnCompleted = (
+const setProjectInsightStatusOnCompleted = (
   insights: Insight[],
   projectId: string,
-  counts: AcceptStatusCounts,
 ): Insight[] =>
   insights.map((insight) => {
     if (insight.insight_id !== projectId) return insight;
     const normalizedStatus = insight.status?.toLowerCase();
     const projectStatus = normalizedStatus === "declined" ? "Declined" : "Accepted";
-    const existingRefs = toObjectRecord(insight.additional_refs);
     return {
       ...insight,
       status: projectStatus,
-      additional_refs: {
-        ...existingRefs,
-        ...counts,
-      }
     } as Insight;
   });
 
@@ -382,6 +581,7 @@ const formatInsights = (items: Insight[]): FormattedInsight[] => {
   return items.map((item) => {
     const subInsights = childrenByParentId.get(item.insight_id);
     if (!subInsights || subInsights.length === 0) return item;
+    if (Array.isArray(item.sub_insights) && item.sub_insights.length > 0) return item;
 
     return {
       ...item,
@@ -448,18 +648,27 @@ const enrichInsightFindingRefs = (
   };
 };
 
-const isChunk = (value: unknown): value is Chunk => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const chunk = value as Partial<Chunk>;
-  return (
-    typeof chunk.chunk_id === "string" &&
-    typeof chunk.document_id === "string" &&
-    (chunk.type === "text" || chunk.type === "image") &&
-    typeof chunk.content === "string" &&
-    Array.isArray(chunk.block_ids) &&
-    typeof chunk.s3_node === "string"
-  );
-};
+/*
+ * -----------------------------------------------------------------------------
+ * DEPRECATED / UNUSED: generate-insights-v1 surface area
+ * Disabled on 2026-04-11.
+ * Do not modify this block in the future; keep as historical reference only.
+ * Use generate-insights-v2 endpoints exclusively.
+ * -----------------------------------------------------------------------------
+ *
+ * const isChunk = (value: unknown): value is Chunk => {
+ *   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+ *   const chunk = value as Partial<Chunk>;
+ *   return (
+ *     typeof chunk.chunk_id === "string" &&
+ *     typeof chunk.document_id === "string" &&
+ *     (chunk.type === "text" || chunk.type === "image") &&
+ *     typeof chunk.content === "string" &&
+ *     Array.isArray(chunk.block_ids) &&
+ *     typeof chunk.s3_node === "string"
+ *   );
+ * };
+ */
 
 app.get("/insights", async (req: Request, res: Response) => {
   const parsedFilters = extractInsightFilters(req.query);
@@ -537,13 +746,13 @@ app.patch(["/insight/:insightId", "/insights/:insightId"], async (req: Request, 
       return res.status(403).json({ error: "Forbidden for requested insightId" });
     }
 
-    const nextInsight: Insight = {
+    const nextInsight = migrateLegacyAdditionalRefs({
       ...existingInsight,
       ...patch,
       insight_id: insightId,
       user_id: existingInsight.user_id ?? jwtUserId,
       updatedAt: new Date().toISOString(),
-    };
+    });
 
     await updateInsight(nextInsight);
     await upsertInsightDocument(toOpenSearchInsightDocument(nextInsight));
@@ -604,15 +813,19 @@ app.delete("/insights/deleteAll", async (_req: Request, res: Response) => {
     const { deletedCount } = await deleteAllInsightsWithInsightIds();
 
     try {
+      const deletedFromDimensionMetadata = await deleteAllDimensionMetadata();
+      const deletedFromProjects = await deleteAllProjects();
       const deletedFromOpenSearch = await deleteAllInsightDocuments();
       return res.json({
         deleted: deletedCount,
+        deletedFromDimensionMetadata,
+        deletedFromProjects,
         deletedFromOpenSearch,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return res.status(500).json({
-        error: `Dynamo delete succeeded but OpenSearch index wipe failed: ${message}`,
+        error: `Insights delete succeeded but related-table cleanup or OpenSearch index wipe failed: ${message}`,
         deleted: deletedCount,
       });
     }
@@ -632,22 +845,25 @@ app.delete("/project/:projectId", async (req: Request, res: Response) => {
     const { deletedCount, insightIds } = await deleteInsightsByProjectIdWithInsightIds(projectId);
 
     try {
+      const deletedFromDimensionMetadata = await deleteDimensionMetadataByProjectId(projectId);
+      const deletedFromProjects = await deleteProjectsByProjectId(projectId);
       await deleteInsightDocuments(insightIds);
+      return res.json({
+        deleted: deletedCount,
+        deletedFromDimensionMetadata,
+        deletedFromProjects,
+        deletedFromOpenSearch: insightIds.length,
+        projectId,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return res.status(500).json({
-        error: `Dynamo delete succeeded but OpenSearch delete failed: ${message}`,
+        error: `Insights delete succeeded but related-table cleanup or OpenSearch delete failed: ${message}`,
         deleted: deletedCount,
         attemptedOpenSearchDeletes: insightIds.length,
         projectId,
       });
     }
-
-    return res.json({
-      deleted: deletedCount,
-      deletedFromOpenSearch: insightIds.length,
-      projectId,
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
@@ -660,6 +876,8 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
     return res.status(400).json({ error: "projectId is required in path" });
   }
 
+  const isPartialUpdate = isPartialInsightsAcceptRequest(req);
+
   if (isNdjsonRequest(req)) {
     res.status(200);
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -668,11 +886,19 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
     res.flushHeaders();
 
     const counts: AcceptStatusCounts = { countAccepted: 0, countDeclined: 0 };
+    const childInsightIds = new Set<string>();
     let persistedCount = 0;
     let projectInsightFromPayload: Insight | undefined;
     let buffer = "";
+    let existingMetadataTags = new Set<string>();
+    const incomingMetadataTags = new Set<string>();
 
     try {
+      if (!isPartialUpdate) {
+        const existingProjectInsights = await listCurrentProjectInsightsForAccept(projectId);
+        existingMetadataTags = collectMetadataTagsFromInsights(existingProjectInsights);
+      }
+
       for await (const chunk of req) {
         buffer += chunk.toString("utf8");
 
@@ -688,11 +914,13 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
 
           const parsedInsight = toInsightFromStreamLine(line);
           const normalizedInsight = normalizeInsightStatus(parsedInsight);
-          incrementStatusCounts(counts, normalizedInsight);
+          collectMetadataTagsFromInsight(normalizedInsight, incomingMetadataTags);
+          incrementStatusCounts(counts, normalizedInsight, projectId);
 
           if (normalizedInsight.insight_id === projectId) {
             projectInsightFromPayload = normalizedInsight;
           } else {
+            childInsightIds.add(normalizedInsight.insight_id);
             await persistInsights([normalizedInsight]);
             await upsertInsightToOpenSearch(normalizedInsight);
             persistedCount += 1;
@@ -712,10 +940,12 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
       if (trailingLine.length > 0) {
         const parsedInsight = toInsightFromStreamLine(trailingLine);
         const normalizedInsight = normalizeInsightStatus(parsedInsight);
-        incrementStatusCounts(counts, normalizedInsight);
+        collectMetadataTagsFromInsight(normalizedInsight, incomingMetadataTags);
+        incrementStatusCounts(counts, normalizedInsight, projectId);
         if (normalizedInsight.insight_id === projectId) {
           projectInsightFromPayload = normalizedInsight;
         } else {
+          childInsightIds.add(normalizedInsight.insight_id);
           await persistInsights([normalizedInsight]);
           await upsertInsightToOpenSearch(normalizedInsight);
           persistedCount += 1;
@@ -729,10 +959,9 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
       }
 
       if (projectInsightFromPayload) {
-        const [projectInsight] = addProjectAcceptCountsOnCompleted(
+        const [projectInsight] = setProjectInsightStatusOnCompleted(
           [projectInsightFromPayload],
           projectId,
-          counts,
         );
         await persistInsights([projectInsight]);
         await upsertInsightToOpenSearch(projectInsight);
@@ -742,6 +971,21 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
           project_id: projectId,
           countAccepted: counts.countAccepted,
           countDeclined: counts.countDeclined,
+        });
+      }
+
+      if (projectInsightFromPayload && !isPartialUpdate) {
+        await declineRemovedMetadataDimensions({
+          projectId,
+          existingMetadataTags,
+          incomingMetadataTags,
+        });
+
+        await updateProjectCountsByProjectId({
+          projectId,
+          countAccepted: counts.countAccepted,
+          countDeclined: counts.countDeclined,
+          numberChildInsights: childInsightIds.size,
         });
       }
 
@@ -772,17 +1016,48 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
   }
 
   const normalizedInsights = insights.map(normalizeInsightStatus);
-  const statusCounts = countInsightStatuses(normalizedInsights);
-  const updatedInsights = addProjectAcceptCountsOnCompleted(
+  const statusCounts = countInsightStatuses(normalizedInsights, projectId);
+  const numberChildInsights = new Set(
+    normalizedInsights
+      .filter((entry) => entry.insight_id !== projectId)
+      .map((entry) => entry.insight_id),
+  ).size;
+  const updatedInsights = setProjectInsightStatusOnCompleted(
     normalizedInsights,
     projectId,
-    statusCounts,
   );
+  const shouldReconcileMetadataDimensions =
+    !isPartialUpdate && updatedInsights.some((entry) => entry.insight_id === projectId);
 
   try {
+    const existingMetadataTags = shouldReconcileMetadataDimensions
+      ? collectMetadataTagsFromInsights(await listCurrentProjectInsightsForAccept(projectId))
+      : new Set<string>();
+
     await persistInsights(updatedInsights);
     await upsertInsightsToOpenSearch(updatedInsights);
-    return res.json({ updated: updatedInsights.length, items: updatedInsights });
+    const metadataDimensionsDeclined = shouldReconcileMetadataDimensions
+      ? await declineRemovedMetadataDimensions({
+          projectId,
+          existingMetadataTags,
+          incomingMetadataTags: collectMetadataTagsFromInsights(updatedInsights),
+        })
+      : 0;
+
+    if (!isPartialUpdate) {
+      await updateProjectCountsByProjectId({
+        projectId,
+        countAccepted: statusCounts.countAccepted,
+        countDeclined: statusCounts.countDeclined,
+        numberChildInsights,
+      });
+    }
+
+    return res.json({
+      updated: updatedInsights.length,
+      items: updatedInsights,
+      metadataDimensionsDeclined,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
@@ -858,6 +1133,7 @@ app.post("/generate-insights-v2", async (req: Request, res: Response) => {
       families: result.insight_families.length,
       rows: result.insight_rows.length,
       insightFamilyData: result.insight_family_data.length,
+      dimensionMetadata: result.dimension_metadata.length,
     });
     return res.status(200).json(result);
   } catch (error) {
@@ -870,69 +1146,123 @@ app.post("/generate-insights-v2", async (req: Request, res: Response) => {
   }
 });
 
-app.post("/generateInsightsFromChunks", async (req: Request, res: Response) => {
+app.post("/generate-insights-v2-metadata-prepass", async (req: Request, res: Response) => {
   const jwtUserId = getJwtUserId(req);
   if (!jwtUserId) {
     return res.status(401).json({ error: "Authorization bearer token with sub is required" });
   }
 
-  const body = toObjectRecord(req.body);
-  const rawChunks = body.chunks;
-  if (!Array.isArray(rawChunks) || rawChunks.length === 0) {
-    return res.status(400).json({ error: "chunks is required and must be a non-empty array" });
-  }
+  const payload = {
+    ...toObjectRecord(req.body),
+    userId: jwtUserId,
+  } as GenerateInsightsV2Arguments;
 
-  if (!rawChunks.every(isChunk)) {
+  const outputUrlsRaw = payload.outputUrls ?? payload.sourceUris;
+  if (!Array.isArray(outputUrlsRaw) || outputUrlsRaw.length === 0) {
     return res.status(400).json({
-      error:
-        "Each chunk must include chunk_id, document_id, type, content, block_ids, and s3_node.",
+      error: "outputUrls is required and must be a non-empty array (or use sourceUris alias).",
     });
   }
 
-  const chunks = rawChunks as Chunk[];
-  const contextUrls = Array.isArray(body.contextUrls)
-    ? body.contextUrls.filter((url): url is string => typeof url === "string")
-    : [];
-  const researchContext =
-    typeof body.researchContext === "string" ? body.researchContext : "";
-  const userInfo = toObjectRecord(body.userInfo ?? body.user_info) as {
-    full_name?: string;
-    email_address?: string;
-  };
   const requestId = req.header("x-request-id") ?? crypto.randomUUID();
+  console.info("[generate-insights-v2-prepass] starting request", {
+    requestId,
+    userId: jwtUserId,
+    outputUrls: outputUrlsRaw.length,
+  });
 
   try {
-    const summaryResult = await summarizeProject(contextUrls, researchContext, {
-      userId: jwtUserId,
-      userInfo,
-    });
-    const result = await runIngestionPipelineFromChunks(
-      chunks,
-      jwtUserId,
-      userInfo,
-      summaryResult.insight_id,
-    );
-
-    return res.status(202).json({
-      status: "accepted",
+    const result = await generateInsightsV2MetadataPrepassHandler({ arguments: payload });
+    console.info("[generate-insights-v2-prepass] completed request", {
       requestId,
-      ok: result.errors.length === 0,
-      insights: result.insights.length,
       documents: result.documents.length,
-      chunks: result.chunks.length,
-      summary: summaryResult.summary,
-      errors: result.errors.map((error) => ({
-        stage: error.stage,
-        message: error.message,
-        url: error.url,
-        document_id: error.document_id,
-      })),
+      tables: result.tables.length,
+      metadataFilters: result.metadata_filters.length,
+      dimensionMetadata: result.dimension_metadata.length,
     });
+    return res.status(200).json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    console.warn("[generate-insights-v2-prepass] failed request", {
+      requestId,
+      message,
+    });
     return res.status(500).json({ error: message, requestId });
   }
 });
+
+/*
+ * -----------------------------------------------------------------------------
+ * DEPRECATED / UNUSED: generate-insights-v1 endpoint
+ * Disabled on 2026-04-11.
+ * Do not modify this block in the future; keep as historical reference only.
+ * Use /generate-insights-v2 and /generate-insights-v2-metadata-prepass.
+ * -----------------------------------------------------------------------------
+ *
+ * app.post("/generateInsightsFromChunks", async (req: Request, res: Response) => {
+ *   const jwtUserId = getJwtUserId(req);
+ *   if (!jwtUserId) {
+ *     return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+ *   }
+ *
+ *   const body = toObjectRecord(req.body);
+ *   const rawChunks = body.chunks;
+ *   if (!Array.isArray(rawChunks) || rawChunks.length === 0) {
+ *     return res.status(400).json({ error: "chunks is required and must be a non-empty array" });
+ *   }
+ *
+ *   if (!rawChunks.every(isChunk)) {
+ *     return res.status(400).json({
+ *       error:
+ *         "Each chunk must include chunk_id, document_id, type, content, block_ids, and s3_node.",
+ *     });
+ *   }
+ *
+ *   const chunks = rawChunks as Chunk[];
+ *   const contextUrls = Array.isArray(body.contextUrls)
+ *     ? body.contextUrls.filter((url): url is string => typeof url === "string")
+ *     : [];
+ *   const researchContext =
+ *     typeof body.researchContext === "string" ? body.researchContext : "";
+ *   const userInfo = toObjectRecord(body.userInfo ?? body.user_info) as {
+ *     full_name?: string;
+ *     email_address?: string;
+ *   };
+ *   const requestId = req.header("x-request-id") ?? crypto.randomUUID();
+ *
+ *   try {
+ *     const summaryResult = await summarizeProject(contextUrls, researchContext, {
+ *       userId: jwtUserId,
+ *       userInfo,
+ *     });
+ *     const result = await runIngestionPipelineFromChunks(
+ *       chunks,
+ *       jwtUserId,
+ *       userInfo,
+ *       summaryResult.insight_id,
+ *     );
+ *
+ *     return res.status(202).json({
+ *       status: "accepted",
+ *       requestId,
+ *       ok: result.errors.length === 0,
+ *       insights: result.insights.length,
+ *       documents: result.documents.length,
+ *       chunks: result.chunks.length,
+ *       summary: summaryResult.summary,
+ *       errors: result.errors.map((error) => ({
+ *         stage: error.stage,
+ *         message: error.message,
+ *         url: error.url,
+ *         document_id: error.document_id,
+ *       })),
+ *     });
+ *   } catch (error) {
+ *     const message = error instanceof Error ? error.message : "Unknown error";
+ *     return res.status(500).json({ error: message, requestId });
+ *   }
+ * });
+ */
 
 export { app };
 

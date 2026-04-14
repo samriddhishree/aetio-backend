@@ -22,6 +22,7 @@ describe("finalValidationNode timestamps", () => {
         },
       ],
       metadataFilters: ["segment"],
+      dimensionMetadata: [],
       insightFamilies: [
         {
           family_id: "family-1",
@@ -48,6 +49,7 @@ describe("finalValidationNode timestamps", () => {
       status: "Pending",
       persistedFamilyCounts: undefined,
       persistedInsightFamilyDataCounts: undefined,
+      persistedDimensionMetadataCounts: undefined,
     };
 
     const result = await finalValidationNode(state);

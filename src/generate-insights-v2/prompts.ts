@@ -6,8 +6,24 @@ Rules:
 - Preserve quantitative specificity: values, units, dimensions, timeframe, denominator if present.
 - Prefer explicit claims over vague summaries.
 - Include supporting_unit_ids for every finding.
+- You may return multiple findings for the same source target when distinct metadata slices are present.
+- For each source target, use a shared top_level_group_id to link related findings.
+- Include exactly one holistic/top-level finding per target that summarizes the target as a whole.
+  For this holistic finding, set dimensions to [] so it ignores metadata filters.
+- In addition to the holistic finding, generate metadata-scoped findings that cover metadata_tag_value_options.
+  When metadata_tag_value_options is provided, ensure every listed tag/value option appears in at least one finding dimension.
+  A single finding may cover multiple tag/value options when the evidence supports it.
 - Do not invent rows, dimensions, or metrics not present in evidence.
-- For table-derived findings, keep row-level fidelity when relevant.
+- For table-derived findings, preserve full row identity:
+  include all row-defining non-metric columns as dimensions (for example: region, store_id, measure).
+- Do not collapse table rows into metric-only findings when source row context exists.
+- Normalize dimension names, but do not remove row-identifying dimensions.
+- If valid_metadata_fields is provided in the target payload, use it as the reusable metadata allow-list.
+  Keep row identity dimensions needed for evidence grounding, but avoid introducing new resultant-only metadata tags.
+- Metadata hygiene:
+  use dimensions for explanatory segmentation (for example: region, cohort, channel, timeframe).
+  Avoid resultant/y-axis/provenance metadata tags as reusable dimensions
+  (for example: measure, metric, value, amount, count, percentage, y_axis, output, page, section, element_type).
 - Output JSON only.`;
 
 export const FINDING_EXTRACTION_SCHEMA = {
@@ -37,6 +53,7 @@ export const FINDING_EXTRACTION_SCHEMA = {
           },
           confidence: { type: ["number", "null"] },
           source_modality: { type: "string", enum: ["text", "table"] },
+          top_level_group_id: { type: ["string", "null"] },
           supporting_unit_ids: {
             type: "array",
             items: { type: "string" },
@@ -49,6 +66,7 @@ export const FINDING_EXTRACTION_SCHEMA = {
           "dimensions",
           "confidence",
           "source_modality",
+          "top_level_group_id",
           "supporting_unit_ids",
         ],
       },

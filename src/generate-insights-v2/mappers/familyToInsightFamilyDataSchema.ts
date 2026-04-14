@@ -1,4 +1,9 @@
 import type { Finding, InsightFamily } from "../types";
+import {
+  isMetadataEligibleDimensionName,
+  normalizeDimensionName,
+  normalizeDimensionValue,
+} from "../services/metadataService";
 
 export type InferredInsightFamilyDataSchema = {
   has_grid: boolean;
@@ -8,15 +13,10 @@ export type InferredInsightFamilyDataSchema = {
   reasoning: string;
 };
 
-function normalizeText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
+const MAX_DIMENSIONS = 6;
 
-function normalizeTag(value: string): string {
-  return normalizeText(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9_\- ]+/g, "")
-    .replace(/\s+/g, "_");
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
 }
 
 function hasNumericSignal(finding: Finding): boolean {
@@ -72,8 +72,12 @@ export function inferInsightFamilyDataSchema(input: {
 
     const seenTags = new Set<string>();
     for (const dimension of finding.dimensions ?? []) {
-      const tag = normalizeTag(dimension.tag);
-      const value = normalizeText(dimension.value);
+      const tag = normalizeDimensionName(dimension.tag);
+      if (!isMetadataEligibleDimensionName(tag)) continue;
+      const value = normalizeDimensionValue({
+        dimensionName: tag,
+        value: dimension.value,
+      }).canonical_value;
       if (!tag || !value) continue;
 
       const existing = dimensionStats.get(tag) ?? { findingCount: 0, values: new Set<string>() };
@@ -86,8 +90,14 @@ export function inferInsightFamilyDataSchema(input: {
     }
   }
 
-  const filterSet = new Set((family.filters ?? []).map((filter) => normalizeTag(filter)));
-  const dimensionalCandidates = Array.from(dimensionStats.entries())
+  const normalizedFamilyFilters = uniqueStrings(
+    (family.filters ?? [])
+      .map((filter) => normalizeDimensionName(filter))
+      .filter((filter) => isMetadataEligibleDimensionName(filter)),
+  );
+  const filterSet = new Set(normalizedFamilyFilters);
+
+  const stableCandidates = Array.from(dimensionStats.entries())
     .filter(([, stats]) => stats.findingCount >= 2 && stats.values.size >= 2)
     .sort((left, right) => {
       const [leftTag, leftStats] = left;
@@ -100,8 +110,21 @@ export function inferInsightFamilyDataSchema(input: {
       }
       return rightStats.values.size - leftStats.values.size;
     })
-    .map(([tag]) => tag)
-    .slice(0, 3);
+    .map(([tag]) => tag);
+
+  // Context columns may have low cardinality (e.g. Region=West across a section) but still
+  // define row identity and should be preserved.
+  const repeatedContextCandidates = Array.from(dimensionStats.entries())
+    .filter(([, stats]) => stats.findingCount >= 2)
+    .sort((left, right) => right[1].findingCount - left[1].findingCount)
+    .map(([tag]) => tag);
+
+  const familyFilterCandidates = normalizedFamilyFilters.filter((filter) => dimensionStats.has(filter));
+  const dimensionalCandidates = uniqueStrings([
+    ...familyFilterCandidates,
+    ...stableCandidates,
+    ...repeatedContextCandidates,
+  ]).slice(0, MAX_DIMENSIONS);
 
   const metricColumn = inferMetricColumnName(family, findings);
 
@@ -114,7 +137,7 @@ export function inferInsightFamilyDataSchema(input: {
       .toFixed(3),
   );
 
-  if (dimensionalCandidates.length > 0) {
+  if (dimensionalCandidates.length > 0 && findingsWithDimensions >= 2) {
     return {
       has_grid: true,
       dimensions: dimensionalCandidates,

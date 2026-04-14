@@ -2,6 +2,7 @@ import { openai, OPENAI_HELPER_MODEL } from "../../common/services/openai";
 import { hashId } from "../../common/services/utils";
 import type { PipelineError } from "../../types";
 import { FAMILY_GROUPING_PROMPT, FAMILY_GROUPING_SCHEMA } from "../prompts";
+import { normalizeDimensionName } from "../services/metadataService";
 import type {
   GenerateInsightsV2State,
   InsightFamily,
@@ -56,7 +57,7 @@ function normalizeKey(value: string): string {
 }
 
 function normalizeFilterTag(value: string): string {
-  return normalizeKey(value).replace(/\s+/g, "_");
+  return normalizeDimensionName(value);
 }
 
 function countNumericTokens(value: string): number {
@@ -309,7 +310,7 @@ function isOverlyNarrowFamilyText(
     const finding = findingById.get(findingId);
     if (!finding) continue;
     for (const dimension of finding.dimensions ?? []) {
-      const tag = normalizeKey(dimension.tag);
+      const tag = normalizeFilterTag(dimension.tag);
       const value = normalizeKey(dimension.value);
       if (!tag || !value) continue;
       const existing = valuesByTag.get(tag) ?? new Set<string>();
@@ -543,6 +544,7 @@ export async function groupInsightFamiliesNode(
 
     const familyId = hashId(`${familyText}:${questionResult.questionAnswered}:${index}`);
     insightFamilies.push({
+      insight_id: familyId,
       family_id: familyId,
       family_text: familyText,
       question_answered: questionResult.questionAnswered,
