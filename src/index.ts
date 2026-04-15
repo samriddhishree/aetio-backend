@@ -52,7 +52,7 @@ type FormattedInsight = Omit<Insight, "sub_insights"> & {
 
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
-const allowedOrigins = ['http://localhost:5001','https://main.d27ng47b6pfw44.amplifyapp.com']; // Replace with your frontend origins
+const allowedOrigins = ['https://getaetio.com','https://www.getaetio.com','http://localhost:5001','https://main.d27ng47b6pfw44.amplifyapp.com']; // Replace with your frontend origins
 // CORS middleware
 app.use(cors({
   origin: (
