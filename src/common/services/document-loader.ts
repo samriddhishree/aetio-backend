@@ -103,7 +103,6 @@ async function partitionWithUnstructured(
           content: fileBuffer,
           fileName,
         },
-        inferTableStructure: true,
         pdfInferTableStructure: true,
         strategy: Strategy.HiRes,
         ...(pdfLike

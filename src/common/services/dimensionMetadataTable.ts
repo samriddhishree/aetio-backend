@@ -1,5 +1,6 @@
 import {
   BatchWriteCommand,
+  type BatchWriteCommandInput,
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
@@ -7,7 +8,6 @@ import {
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
-import type { WriteRequest } from "@aws-sdk/client-dynamodb";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { getCachedAwsAssumeRoleProvider } from "./aws";
 import { config } from "./config";
@@ -108,6 +108,7 @@ export async function deleteDimensionMetadata(dimensionId: string): Promise<void
 
 const MAX_BATCH = 25;
 const MAX_RETRIES = 5;
+type BatchDeleteRequest = NonNullable<BatchWriteCommandInput["RequestItems"]>[string][number];
 
 export async function deleteDimensionMetadataByProjectId(projectId: string): Promise<number> {
   if (!projectId || projectId.trim().length === 0) return 0;
@@ -264,12 +265,9 @@ async function scanAllDimensionMetadataKeys(): Promise<Array<{ dimension_id: str
 async function batchDeleteByKeys(keys: Array<{ dimension_id: string }>): Promise<void> {
   if (keys.length === 0) return;
 
-  const deleteRequests = keys.map(
-    (key) =>
-      ({
-        DeleteRequest: { Key: key },
-      }) as WriteRequest,
-  );
+  const deleteRequests: BatchDeleteRequest[] = keys.map((key) => ({
+    DeleteRequest: { Key: key },
+  }));
 
   for (let index = 0; index < deleteRequests.length; index += MAX_BATCH) {
     let unprocessed = deleteRequests.slice(index, index + MAX_BATCH);
@@ -284,7 +282,7 @@ async function batchDeleteByKeys(keys: Array<{ dimension_id: string }>): Promise
       );
 
       const remaining = response.UnprocessedItems?.[config.dimensionMetadataTableName];
-      unprocessed = (remaining ? Array.from(remaining) : []) as WriteRequest[];
+      unprocessed = remaining ? Array.from(remaining) : [];
 
       if (unprocessed.length > 0) {
         const backoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);

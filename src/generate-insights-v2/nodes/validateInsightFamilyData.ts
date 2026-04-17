@@ -52,9 +52,7 @@ function alignRowsToMetadata(
           };
         })
         .filter(
-          (
-            entry,
-          ): entry is InsightFamilyData["rows"][number]["filter_values"][number] => Boolean(entry),
+          (entry): entry is NonNullable<typeof entry> => entry !== null,
         );
 
       if (alignedFilterValues.length !== requiredDimensions.size) return null;
@@ -63,7 +61,7 @@ function alignRowsToMetadata(
         filter_values: alignedFilterValues,
       };
     })
-    .filter((row): row is InsightFamilyData["rows"][number] => Boolean(row));
+    .filter((row): row is NonNullable<typeof row> => row !== null);
 
   return {
     ...table,

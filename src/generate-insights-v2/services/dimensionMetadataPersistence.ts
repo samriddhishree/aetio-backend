@@ -61,7 +61,7 @@ function toCoreMetadata(input: PersistedDimensionMetadata | DimensionMetadata): 
     aliases: input.aliases,
     allowed_values: input.allowed_values,
     tags: input.tags,
-    status: input.status,
+    status: input.status === "Declined" ? "deprecated" : input.status,
     created_at: input.created_at,
     updated_at: input.updated_at,
   };

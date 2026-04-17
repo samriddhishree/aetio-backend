@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import type { WriteRequest } from "@aws-sdk/client-dynamodb";
 import {
   BatchWriteCommand,
+  type BatchWriteCommandInput,
   DynamoDBDocumentClient,
   PutCommand,
   QueryCommand,
@@ -21,6 +21,7 @@ const docClient = DynamoDBDocumentClient.from(client, {
     removeUndefinedValues: true,
   },
 });
+type BatchDeleteRequest = NonNullable<BatchWriteCommandInput["RequestItems"]>[string][number];
 
 export const PENDING_PROJECT_STATUS = "Pending";
 
@@ -308,12 +309,9 @@ async function scanAllProjectKeys(): Promise<Array<{ user_id: string; status: st
 async function batchDeleteByKeys(keys: Array<{ user_id: string; status: string }>): Promise<void> {
   if (keys.length === 0) return;
 
-  const deleteRequests = keys.map(
-    (key) =>
-      ({
-        DeleteRequest: { Key: key },
-      }) as WriteRequest,
-  );
+  const deleteRequests: BatchDeleteRequest[] = keys.map((key) => ({
+    DeleteRequest: { Key: key },
+  }));
 
   for (let index = 0; index < deleteRequests.length; index += MAX_BATCH) {
     let unprocessed = deleteRequests.slice(index, index + MAX_BATCH);
@@ -328,7 +326,7 @@ async function batchDeleteByKeys(keys: Array<{ user_id: string; status: string }
       );
 
       const remaining = response.UnprocessedItems?.[config.projectsTableName];
-      unprocessed = (remaining ? Array.from(remaining) : []) as WriteRequest[];
+      unprocessed = remaining ? Array.from(remaining) : [];
 
       if (unprocessed.length > 0) {
         const backoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);
