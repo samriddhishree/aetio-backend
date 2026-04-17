@@ -1114,6 +1114,17 @@ app.post("/generate-insights-v2", async (req: Request, res: Response) => {
   const contextUrlsRaw = Array.isArray(payload.contextUrls) ? payload.contextUrls : [];
   const researchContext =
     typeof payload.researchContext === "string" ? payload.researchContext : undefined;
+  const hasStructuredResearchFields = Boolean(
+    (typeof payload.researchObjective === "string" && payload.researchObjective.trim().length > 0) ||
+      (typeof payload.methodology === "string" && payload.methodology.trim().length > 0) ||
+      (typeof payload.additionalContext === "string" && payload.additionalContext.trim().length > 0) ||
+      (typeof payload.analysisStartDate === "string" && payload.analysisStartDate.trim().length > 0) ||
+      (typeof payload.analysisEndDate === "string" && payload.analysisEndDate.trim().length > 0) ||
+      (typeof payload.owner === "string" && payload.owner.trim().length > 0) ||
+      (typeof payload.relatedProjects === "string" && payload.relatedProjects.trim().length > 0) ||
+      payload.approvalStatus ||
+      payload.sharingScope,
+  );
 
   const requestId = req.header("x-request-id") ?? crypto.randomUUID();
   console.info("[generate-insights-v2] starting request", {
@@ -1122,6 +1133,7 @@ app.post("/generate-insights-v2", async (req: Request, res: Response) => {
     outputUrls: outputUrlsRaw.length,
     contextUrls: contextUrlsRaw.length,
     hasResearchContext: Boolean(researchContext?.trim()),
+    hasStructuredResearchFields,
   });
 
   try {
