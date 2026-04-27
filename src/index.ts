@@ -6,8 +6,13 @@ import {
   generateInsightsV2Handler,
   type GenerateInsightsV2Arguments,
 } from "./generate-insights-v2/handler";
+import {
+  generateInsightsV3Handler,
+} from "./generate-insights-v3/handler";
+import { configureRuntimeLogging } from "./common/services/logging";
+import type { GenerateInsightsV3Arguments } from "./generate-insights-v3/types";
 // NOTE: generate-insights-v1 is intentionally disabled and unused.
-// Do not re-enable or modify v1 paths; use generate-insights-v2 endpoints only.
+// Do not re-enable or modify v1 paths; use generate-insights-v2/v3 endpoints.
 import { getAwsAssumeRoleProvider, getCachedAwsAssumeRoleProvider } from "./common/services/aws";
 import {
   deleteAllInsightsWithInsightIds,
@@ -20,10 +25,18 @@ import {
   type InsightFilterKey,
 } from "./common/services/dynamo";
 import {
+  deleteAllInsightFamilyData,
   getInsightFamilyData,
   putInsightFamilyData,
   type PersistedInsightFamilyData,
 } from "./common/services/insightFamilyDataTable";
+import {
+  deleteAllExtractionTraces,
+  deleteAllReviewEvents,
+  getLatestTraceForInsight,
+  putExtractionTraces,
+  putReviewEvents,
+} from "./common/services/insightEvaluationTable";
 import {
   deleteAllInsightDocuments,
   deleteInsightDocuments,
@@ -42,9 +55,15 @@ import {
 } from "./common/services/projectsTable";
 import { toOpenSearchInsightDocument } from "./generate-insights-v2/services/familyPersistence";
 import { normalizeDimensionName } from "./generate-insights-v2/services/metadataService";
+import { OPENAI_HELPER_MODEL } from "./common/services/openai";
+import { buildV2ExtractionTraces, buildV3ExtractionTraces } from "./evals/generateInsights/trace";
+import { buildDeletedInsightEvent, buildInsightReviewEvents } from "./evals/generateInsights/review";
+import { buildEvaluationSummaryReport } from "./evals/generateInsights/report";
 
 import type { FindingRef, Insight, InsightMetadataEntry } from "./types";
 import { config  } from "./common/services/config";
+
+configureRuntimeLogging();
 
 type FormattedInsight = Omit<Insight, "sub_insights"> & {
   sub_insights?: Insight["sub_insights"] | Insight[];
@@ -88,6 +107,16 @@ type AcceptStatusCounts = {
   countDeclined: number;
 };
 
+type IncomingStatusCounts = {
+  total: number;
+  accepted: number;
+  declined: number;
+  rejected: number;
+  pending: number;
+  missing: number;
+  other: number;
+};
+
 type AcceptStreamEvent =
   | {
       type: "insight_persisted";
@@ -114,6 +143,32 @@ type AcceptStreamEvent =
 
 app.get("/health", (_req, res) => {
   res.status(200).send("ok");
+});
+
+app.get("/evals/summary", async (req: Request, res: Response) => {
+  const projectId =
+    typeof req.query.project_id === "string" && req.query.project_id.trim().length > 0
+      ? req.query.project_id.trim()
+      : undefined;
+  const runId =
+    typeof req.query.run_id === "string" && req.query.run_id.trim().length > 0
+      ? req.query.run_id.trim()
+      : undefined;
+
+  if (!projectId && !runId) {
+    return res.status(400).json({ error: "project_id or run_id is required." });
+  }
+
+  try {
+    const summary = await buildEvaluationSummaryReport({
+      projectId,
+      runId,
+    });
+    return res.status(200).json(summary);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res.status(500).json({ error: message });
+  }
 });
 
 app.get("/projects", async (req: Request, res: Response) => {
@@ -250,6 +305,54 @@ const toObjectRecord = (value: unknown): Record<string, unknown> =>
 
 const compactText = (value: string): string => value.replace(/\s+/g, " ").trim();
 
+const normalizeIncomingStatus = (value: unknown): string =>
+  compactText(typeof value === "string" ? value : "").toLowerCase();
+
+const createIncomingStatusCounts = (): IncomingStatusCounts => ({
+  total: 0,
+  accepted: 0,
+  declined: 0,
+  rejected: 0,
+  pending: 0,
+  missing: 0,
+  other: 0,
+});
+
+const incrementIncomingStatusCounts = (counts: IncomingStatusCounts, status: unknown): void => {
+  const normalized = normalizeIncomingStatus(status);
+  counts.total += 1;
+
+  if (!normalized) {
+    counts.missing += 1;
+    return;
+  }
+  if (normalized === "accepted" || normalized === "approved") {
+    counts.accepted += 1;
+    return;
+  }
+  if (normalized === "declined") {
+    counts.declined += 1;
+    return;
+  }
+  if (normalized === "rejected") {
+    counts.rejected += 1;
+    return;
+  }
+  if (normalized === "pending") {
+    counts.pending += 1;
+    return;
+  }
+  counts.other += 1;
+};
+
+const collectIncomingStatusCounts = (insights: Array<Pick<Insight, "status">>): IncomingStatusCounts => {
+  const counts = createIncomingStatusCounts();
+  for (const insight of insights) {
+    incrementIncomingStatusCounts(counts, insight.status);
+  }
+  return counts;
+};
+
 const migrateLegacyAdditionalRefs = (insight: Insight): Insight => {
   const refs = toObjectRecord(insight.additional_refs);
   const next: Insight = {
@@ -309,10 +412,15 @@ const normalizeInsightMetadata = (metadata: unknown): InsightMetadataEntry[] | u
 const normalizeInsightStatus = (insight: Insight): Insight => {
   const migratedInsight = migrateLegacyAdditionalRefs(insight);
   const normalizedMetadata = normalizeInsightMetadata(migratedInsight.metadata);
+  const normalizedIncomingStatus = normalizeIncomingStatus(migratedInsight.status);
+
   return {
     ...migratedInsight,
     evidence_snippet: migratedInsight.evidence_snippet?.trim() || migratedInsight.text,
-    status: migratedInsight.status?.toLowerCase() === "declined" ? migratedInsight.status : "Accepted",
+    status:
+      normalizedIncomingStatus === "declined" || normalizedIncomingStatus === "rejected"
+        ? "Declined"
+        : "Accepted",
     ...(normalizedMetadata ? { metadata: normalizedMetadata } : {}),
   };
 };
@@ -648,6 +756,92 @@ const enrichInsightFindingRefs = (
   };
 };
 
+const loadInsightFamilyDataMap = async (tableIds: string[]): Promise<Map<string, PersistedInsightFamilyData>> => {
+  const uniqueTableIds = Array.from(
+    new Set(
+      tableIds
+        .map((tableId) => tableId.trim())
+        .filter((tableId) => tableId.length > 0),
+    ),
+  );
+  const items = await Promise.all(uniqueTableIds.map((tableId) => getInsightFamilyData(tableId)));
+  return new Map(
+    items
+      .filter((item): item is PersistedInsightFamilyData => Boolean(item))
+      .map((item) => [item.table_id, item]),
+  );
+};
+
+const persistExtractionTracesSafely = async (input: {
+  traces: ReturnType<typeof buildV2ExtractionTraces> | ReturnType<typeof buildV3ExtractionTraces>;
+  context: string;
+}): Promise<void> => {
+  if (input.traces.length === 0) return;
+  try {
+    await putExtractionTraces(input.traces);
+    console.info("[eval] extraction traces persisted", {
+      context: input.context,
+      traces: input.traces.length,
+      run_id: input.traces[0]?.run_id,
+    });
+  } catch (error) {
+    console.warn("[eval] failed persisting extraction traces", {
+      context: input.context,
+      traces: input.traces.length,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+};
+
+const persistReviewEventsSafely = async (input: {
+  events: ReturnType<typeof buildInsightReviewEvents>;
+  context: string;
+}): Promise<void> => {
+  if (input.events.length === 0) return;
+  try {
+    await putReviewEvents(input.events);
+    const metadataEventCounts = input.events.reduce(
+      (acc, event) => {
+        if (event.event_type === "metadata_added") acc.added += 1;
+        if (event.event_type === "metadata_removed") acc.removed += 1;
+        if (event.event_type === "metadata_edited") acc.edited += 1;
+        return acc;
+      },
+      { added: 0, removed: 0, edited: 0 },
+    );
+
+    console.info("[eval] review events persisted", {
+      context: input.context,
+      events: input.events.length,
+      project_id: input.events[0]?.project_id,
+    });
+    if (
+      metadataEventCounts.added > 0
+      || metadataEventCounts.removed > 0
+      || metadataEventCounts.edited > 0
+    ) {
+      console.info("[eval] metadata review events persisted", {
+        context: input.context,
+        project_id: input.events[0]?.project_id,
+        metadata_added: metadataEventCounts.added,
+        metadata_removed: metadataEventCounts.removed,
+        metadata_edited: metadataEventCounts.edited,
+      });
+    }
+  } catch (error) {
+    console.warn("[eval] failed persisting review events", {
+      context: input.context,
+      events: input.events.length,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+};
+
+const inferTerminalReviewAction = (status: string | undefined): "accepted" | "declined" => {
+  const normalized = status?.toLowerCase();
+  return normalized === "declined" ? "declined" : "accepted";
+};
+
 /*
  * -----------------------------------------------------------------------------
  * DEPRECATED / UNUSED: generate-insights-v1 surface area
@@ -756,6 +950,46 @@ app.patch(["/insight/:insightId", "/insights/:insightId"], async (req: Request, 
 
     await updateInsight(nextInsight);
     await upsertInsightDocument(toOpenSearchInsightDocument(nextInsight));
+
+    const projectIdForEval = nextInsight.project_id ?? existingInsight.project_id;
+    if (projectIdForEval) {
+      const [beforeTable, afterTable, latestTrace] = await Promise.all([
+        existingInsight.insight_family_data_id
+          ? getInsightFamilyData(existingInsight.insight_family_data_id)
+          : Promise.resolve(undefined),
+        nextInsight.insight_family_data_id
+          ? getInsightFamilyData(nextInsight.insight_family_data_id)
+          : Promise.resolve(undefined),
+        getLatestTraceForInsight(insightId),
+      ]);
+
+      const terminalStatusChanged = existingInsight.status !== nextInsight.status
+        && (nextInsight.status?.toLowerCase() === "accepted" || nextInsight.status?.toLowerCase() === "declined");
+
+      const events = buildInsightReviewEvents({
+        projectId: projectIdForEval,
+        beforeInsight: existingInsight,
+        afterInsight: nextInsight,
+        beforeTable: beforeTable ?? undefined,
+        afterTable: afterTable ?? undefined,
+        userId: jwtUserId,
+        runId: latestTrace?.run_id,
+        terminalAction: terminalStatusChanged ? inferTerminalReviewAction(nextInsight.status) : undefined,
+      }).map((event) => ({
+        ...event,
+        pipeline_version: latestTrace?.pipeline_version,
+        extraction_mode: latestTrace?.extraction_mode,
+        model_name: latestTrace?.model_name,
+        prompt_version: latestTrace?.prompt_version,
+        source_mode: latestTrace?.source_mode,
+      }));
+
+      await persistReviewEventsSafely({
+        events,
+        context: "PATCH /insight/:insightId",
+      });
+    }
+
     return res.status(200).json({ insight: nextInsight });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -801,6 +1035,38 @@ app.patch("/insight-family-data/:tableId", async (req: Request, res: Response) =
     };
 
     await putInsightFamilyData(nextData);
+
+    const linkedByFamilyId = existingData.family_id
+      ? await getInsightById(existingData.family_id)
+      : undefined;
+    const linkedInsight = linkedByFamilyId
+      ?? (await listInsights()).find((insight) => insight.insight_family_data_id === tableId);
+
+    if (linkedInsight?.project_id) {
+      const latestTrace = await getLatestTraceForInsight(linkedInsight.insight_id);
+      const events = buildInsightReviewEvents({
+        projectId: linkedInsight.project_id,
+        beforeInsight: linkedInsight,
+        afterInsight: linkedInsight,
+        beforeTable: existingData,
+        afterTable: nextData,
+        userId: jwtUserId,
+        runId: latestTrace?.run_id,
+      }).map((event) => ({
+        ...event,
+        pipeline_version: latestTrace?.pipeline_version,
+        extraction_mode: latestTrace?.extraction_mode,
+        model_name: latestTrace?.model_name,
+        prompt_version: latestTrace?.prompt_version,
+        source_mode: latestTrace?.source_mode,
+      }));
+
+      await persistReviewEventsSafely({
+        events,
+        context: "PATCH /insight-family-data/:tableId",
+      });
+    }
+
     return res.status(200).json({ data: nextData });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -814,18 +1080,24 @@ app.delete("/insights/deleteAll", async (_req: Request, res: Response) => {
 
     try {
       const deletedFromDimensionMetadata = await deleteAllDimensionMetadata();
+      const deletedFromInsightFamilyData = await deleteAllInsightFamilyData();
+      const deletedFromInsightEvaluationTraces = await deleteAllExtractionTraces();
+      const deletedFromInsightReviewEvents = await deleteAllReviewEvents();
       const deletedFromProjects = await deleteAllProjects();
       const deletedFromOpenSearch = await deleteAllInsightDocuments();
       return res.json({
         deleted: deletedCount,
         deletedFromDimensionMetadata,
+        deletedFromInsightFamilyData,
+        deletedFromInsightEvaluationTraces,
+        deletedFromInsightReviewEvents,
         deletedFromProjects,
         deletedFromOpenSearch,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return res.status(500).json({
-        error: `Insights delete succeeded but related-table cleanup or OpenSearch index wipe failed: ${message}`,
+        error: `Insights delete succeeded but cleanup of known tables and/or OpenSearch index wipe failed: ${message}`,
         deleted: deletedCount,
       });
     }
@@ -842,12 +1114,47 @@ app.delete("/project/:projectId", async (req: Request, res: Response) => {
   }
 
   try {
+    const existingProjectInsights = await listCurrentProjectInsightsForAccept(projectId);
     const { deletedCount, insightIds } = await deleteInsightsByProjectIdWithInsightIds(projectId);
 
     try {
       const deletedFromDimensionMetadata = await deleteDimensionMetadataByProjectId(projectId);
       const deletedFromProjects = await deleteProjectsByProjectId(projectId);
       await deleteInsightDocuments(insightIds);
+
+      const tableById = await loadInsightFamilyDataMap(
+        existingProjectInsights
+          .map((insight) => insight.insight_family_data_id?.trim())
+          .filter((tableId): tableId is string => Boolean(tableId)),
+      );
+      const deleteEvents = await Promise.all(
+        existingProjectInsights
+          .filter((insight) => insight.insight_id !== projectId)
+          .map(async (insight) => {
+            const trace = await getLatestTraceForInsight(insight.insight_id);
+            const event = buildDeletedInsightEvent({
+              projectId,
+              insight,
+              table: insight.insight_family_data_id
+                ? tableById.get(insight.insight_family_data_id)
+                : undefined,
+              runId: trace?.run_id,
+            });
+            return {
+              ...event,
+              pipeline_version: trace?.pipeline_version,
+              extraction_mode: trace?.extraction_mode,
+              model_name: trace?.model_name,
+              prompt_version: trace?.prompt_version,
+              source_mode: trace?.source_mode,
+            };
+          }),
+      );
+      await persistReviewEventsSafely({
+        events: deleteEvents,
+        context: "DELETE /project/:projectId",
+      });
+
       return res.json({
         deleted: deletedCount,
         deletedFromDimensionMetadata,
@@ -875,6 +1182,7 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
   if (!projectId) {
     return res.status(400).json({ error: "projectId is required in path" });
   }
+  const jwtUserId = getJwtUserId(req) ?? undefined;
 
   const isPartialUpdate = isPartialInsightsAcceptRequest(req);
 
@@ -891,11 +1199,16 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
     let projectInsightFromPayload: Insight | undefined;
     let buffer = "";
     let existingMetadataTags = new Set<string>();
+    let existingProjectInsights: Insight[] = [];
+    let existingInsightById = new Map<string, Insight>();
+    const finalInsightsForEval: Insight[] = [];
     const incomingMetadataTags = new Set<string>();
+    const incomingStatusCounts = createIncomingStatusCounts();
 
     try {
+      existingProjectInsights = await listCurrentProjectInsightsForAccept(projectId);
+      existingInsightById = new Map(existingProjectInsights.map((insight) => [insight.insight_id, insight]));
       if (!isPartialUpdate) {
-        const existingProjectInsights = await listCurrentProjectInsightsForAccept(projectId);
         existingMetadataTags = collectMetadataTagsFromInsights(existingProjectInsights);
       }
 
@@ -913,7 +1226,9 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
           }
 
           const parsedInsight = toInsightFromStreamLine(line);
+          incrementIncomingStatusCounts(incomingStatusCounts, parsedInsight.status);
           const normalizedInsight = normalizeInsightStatus(parsedInsight);
+          finalInsightsForEval.push(normalizedInsight);
           collectMetadataTagsFromInsight(normalizedInsight, incomingMetadataTags);
           incrementStatusCounts(counts, normalizedInsight, projectId);
 
@@ -939,7 +1254,9 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
       const trailingLine = buffer.trim();
       if (trailingLine.length > 0) {
         const parsedInsight = toInsightFromStreamLine(trailingLine);
+        incrementIncomingStatusCounts(incomingStatusCounts, parsedInsight.status);
         const normalizedInsight = normalizeInsightStatus(parsedInsight);
+        finalInsightsForEval.push(normalizedInsight);
         collectMetadataTagsFromInsight(normalizedInsight, incomingMetadataTags);
         incrementStatusCounts(counts, normalizedInsight, projectId);
         if (normalizedInsight.insight_id === projectId) {
@@ -989,6 +1306,58 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
         });
       }
 
+      const tableIdsForEval = Array.from(
+        new Set(
+          [...existingProjectInsights, ...finalInsightsForEval]
+            .map((insight) => insight.insight_family_data_id?.trim())
+            .filter((tableId): tableId is string => Boolean(tableId)),
+        ),
+      );
+      const tableById = await loadInsightFamilyDataMap(tableIdsForEval);
+      const reviewEvents = await Promise.all(
+        finalInsightsForEval
+          .filter((insight) => insight.insight_id !== projectId)
+          .map(async (insight) => {
+            const beforeInsight = existingInsightById.get(insight.insight_id);
+            const latestTrace = await getLatestTraceForInsight(insight.insight_id);
+            const events = buildInsightReviewEvents({
+              projectId,
+              beforeInsight,
+              afterInsight: insight,
+              beforeTable: beforeInsight?.insight_family_data_id
+                ? tableById.get(beforeInsight.insight_family_data_id)
+                : undefined,
+              afterTable: insight.insight_family_data_id
+                ? tableById.get(insight.insight_family_data_id)
+                : undefined,
+              userId: jwtUserId,
+              runId: latestTrace?.run_id,
+              terminalAction: inferTerminalReviewAction(insight.status),
+            }).map((event) => ({
+              ...event,
+              pipeline_version: latestTrace?.pipeline_version,
+              extraction_mode: latestTrace?.extraction_mode,
+              model_name: latestTrace?.model_name,
+              prompt_version: latestTrace?.prompt_version,
+              source_mode: latestTrace?.source_mode,
+            }));
+            return events;
+          }),
+      );
+      await persistReviewEventsSafely({
+        events: reviewEvents.flat(),
+        context: "PATCH /insights/accept/:projectId (ndjson)",
+      });
+
+      console.info("[insights-accept] payload status counts", {
+        mode: "ndjson",
+        projectId,
+        partial: isPartialUpdate,
+        incomingStatusCounts,
+        normalizedStatusCounts: counts,
+        persistedCount,
+      });
+
       writeAcceptStreamEvent(res, {
         type: "complete",
         updated: persistedCount,
@@ -1015,6 +1384,7 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
     return res.status(400).json({ error: "Body must be an array of insights or { insights: Insight[] }" });
   }
 
+  const incomingStatusCounts = collectIncomingStatusCounts(insights);
   const normalizedInsights = insights.map(normalizeInsightStatus);
   const statusCounts = countInsightStatuses(normalizedInsights, projectId);
   const numberChildInsights = new Set(
@@ -1030,8 +1400,10 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
     !isPartialUpdate && updatedInsights.some((entry) => entry.insight_id === projectId);
 
   try {
+    const existingProjectInsights = await listCurrentProjectInsightsForAccept(projectId);
+    const existingInsightById = new Map(existingProjectInsights.map((insight) => [insight.insight_id, insight]));
     const existingMetadataTags = shouldReconcileMetadataDimensions
-      ? collectMetadataTagsFromInsights(await listCurrentProjectInsightsForAccept(projectId))
+      ? collectMetadataTagsFromInsights(existingProjectInsights)
       : new Set<string>();
 
     await persistInsights(updatedInsights);
@@ -1052,6 +1424,59 @@ app.patch("/insights/accept/:projectId", async (req: Request, res: Response) => 
         numberChildInsights,
       });
     }
+
+    const tableIdsForEval = Array.from(
+      new Set(
+        [...existingProjectInsights, ...updatedInsights]
+          .map((insight) => insight.insight_family_data_id?.trim())
+          .filter((tableId): tableId is string => Boolean(tableId)),
+      ),
+    );
+    const tableById = await loadInsightFamilyDataMap(tableIdsForEval);
+    const reviewEvents = await Promise.all(
+      updatedInsights
+        .filter((insight) => insight.insight_id !== projectId)
+        .map(async (insight) => {
+          const beforeInsight = existingInsightById.get(insight.insight_id);
+          const latestTrace = await getLatestTraceForInsight(insight.insight_id);
+          const events = buildInsightReviewEvents({
+            projectId,
+            beforeInsight,
+            afterInsight: insight,
+            beforeTable: beforeInsight?.insight_family_data_id
+              ? tableById.get(beforeInsight.insight_family_data_id)
+              : undefined,
+            afterTable: insight.insight_family_data_id
+              ? tableById.get(insight.insight_family_data_id)
+              : undefined,
+            userId: jwtUserId,
+            runId: latestTrace?.run_id,
+            terminalAction: inferTerminalReviewAction(insight.status),
+          }).map((event) => ({
+            ...event,
+            pipeline_version: latestTrace?.pipeline_version,
+            extraction_mode: latestTrace?.extraction_mode,
+            model_name: latestTrace?.model_name,
+            prompt_version: latestTrace?.prompt_version,
+            source_mode: latestTrace?.source_mode,
+          }));
+          return events;
+        }),
+    );
+    await persistReviewEventsSafely({
+      events: reviewEvents.flat(),
+      context: "PATCH /insights/accept/:projectId",
+    });
+
+    console.info("[insights-accept] payload status counts", {
+      mode: "json",
+      projectId,
+      partial: isPartialUpdate,
+      incomingStatusCounts,
+      normalizedStatusCounts: statusCounts,
+      insightCount: insights.length,
+      updatedCount: updatedInsights.length,
+    });
 
     return res.json({
       updated: updatedInsights.length,
@@ -1138,6 +1563,32 @@ app.post("/generate-insights-v2", async (req: Request, res: Response) => {
 
   try {
     const result = await generateInsightsV2Handler({ arguments: payload });
+    const traces = buildV2ExtractionTraces({
+      run_id: requestId,
+      model_name: OPENAI_HELPER_MODEL,
+      prompt_version: config.generateInsightsV2PromptVersion,
+      pipeline_version: "generate-insights-v2",
+      documents: result.documents,
+      insight_families: result.insight_families.map((family) => ({
+        insight_id: family.insight_id ?? family.family_id,
+        project_id: family.project_id,
+        document_id: family.document_ids?.[0] ?? result.documents[0]?.document_id,
+        insight_family_data_id: family.insight_family_data_id,
+        family_text: family.family_text,
+        question_answered: family.question_answered,
+        table_dimensions: family.table_dimensions,
+        row_count: family.row_count,
+      })),
+      insight_family_data: result.insight_family_data.map((table) => ({
+        table_id: table.table_id,
+        row_count: table.row_count,
+        dimensions: table.dimensions,
+      })),
+    });
+    await persistExtractionTracesSafely({
+      traces,
+      context: "POST /generate-insights-v2",
+    });
     console.info("[generate-insights-v2] completed request", {
       requestId,
       documents: result.documents.length,
@@ -1151,6 +1602,81 @@ app.post("/generate-insights-v2", async (req: Request, res: Response) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.warn("[generate-insights-v2] failed request", {
+      requestId,
+      message,
+    });
+    return res.status(500).json({ error: message, requestId });
+  }
+});
+
+app.post("/generate-insights-v3", async (req: Request, res: Response) => {
+  const jwtUserId = getJwtUserId(req);
+  if (!jwtUserId) {
+    return res.status(401).json({ error: "Authorization bearer token with sub is required" });
+  }
+
+  const payload = {
+    ...toObjectRecord(req.body),
+    userId: jwtUserId,
+  } as GenerateInsightsV3Arguments;
+
+  const outputUrlsRaw = payload.outputUrls ?? payload.sourceUris;
+  if (!Array.isArray(outputUrlsRaw) || outputUrlsRaw.length === 0) {
+    return res.status(400).json({
+      error: "outputUrls is required and must be a non-empty array (or use sourceUris alias).",
+    });
+  }
+  const contextUrlsRaw = Array.isArray(payload.contextUrls) ? payload.contextUrls : [];
+  const researchContext =
+    typeof payload.researchContext === "string" ? payload.researchContext : undefined;
+  const hasStructuredResearchFields = Boolean(
+    (typeof payload.researchObjective === "string" && payload.researchObjective.trim().length > 0) ||
+      (typeof payload.methodology === "string" && payload.methodology.trim().length > 0) ||
+      (typeof payload.additionalContext === "string" && payload.additionalContext.trim().length > 0) ||
+      (typeof payload.analysisStartDate === "string" && payload.analysisStartDate.trim().length > 0) ||
+      (typeof payload.analysisEndDate === "string" && payload.analysisEndDate.trim().length > 0) ||
+      (typeof payload.owner === "string" && payload.owner.trim().length > 0) ||
+      (typeof payload.relatedProjects === "string" && payload.relatedProjects.trim().length > 0) ||
+      payload.approvalStatus ||
+      payload.sharingScope,
+  );
+
+  const requestId = req.header("x-request-id") ?? crypto.randomUUID();
+  console.info("[generate-insights-v3] starting request", {
+    requestId,
+    userId: jwtUserId,
+    outputUrls: outputUrlsRaw.length,
+    contextUrls: contextUrlsRaw.length,
+    hasResearchContext: Boolean(researchContext?.trim()),
+    hasStructuredResearchFields,
+  });
+
+  try {
+    const result = await generateInsightsV3Handler({ arguments: payload });
+    const traces = buildV3ExtractionTraces({
+      run_id: requestId,
+      model_name: OPENAI_HELPER_MODEL,
+      prompt_version: config.generateInsightsV3PromptVersion,
+      pipeline_version: "generate-insights-v3",
+      insights: result.insights,
+      documents: result.documents,
+    });
+    await persistExtractionTracesSafely({
+      traces,
+      context: "POST /generate-insights-v3",
+    });
+    console.info("[generate-insights-v3] completed request", {
+      requestId,
+      documents: result.documents.length,
+      insights: result.insights.length,
+      insightFamilyData: result.insight_family_data.length,
+      dimensionMetadata: result.dimension_metadata.length,
+      errors: result.errors.length,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.warn("[generate-insights-v3] failed request", {
       requestId,
       message,
     });

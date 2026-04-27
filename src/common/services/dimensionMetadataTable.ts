@@ -5,10 +5,11 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  QueryCommand,
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { getCachedAwsAssumeRoleProvider } from "./aws";
 import { config } from "./config";
 import { sleep } from "./utils";
@@ -72,6 +73,7 @@ const docClient = DynamoDBDocumentClient.from(client, {
     removeUndefinedValues: true,
   },
 });
+const DIMENSION_METADATA_BY_PROJECT_ID_INDEX = config.dimensionMetadataProjectIdIndexName;
 
 export async function putDimensionMetadata(record: PersistedDimensionMetadata): Promise<void> {
   await docClient.send(
@@ -109,6 +111,7 @@ export async function deleteDimensionMetadata(dimensionId: string): Promise<void
 const MAX_BATCH = 25;
 const MAX_RETRIES = 5;
 type BatchDeleteRequest = NonNullable<BatchWriteCommandInput["RequestItems"]>[string][number];
+type DynamoKey = Record<string, unknown>;
 
 export async function deleteDimensionMetadataByProjectId(projectId: string): Promise<number> {
   if (!projectId || projectId.trim().length === 0) return 0;
@@ -140,37 +143,14 @@ export async function setDimensionMetadataStatusByProjectAndCanonicalNames(input
   if (canonicalNameSet.size === 0) return 0;
 
   const dimensionIds: string[] = [];
-  let lastEvaluatedKey: Record<string, unknown> | undefined;
-
-  do {
-    const response = await docClient.send(
-      new ScanCommand({
-        TableName: config.dimensionMetadataTableName,
-        ProjectionExpression: "#dimension_id, #canonical_name",
-        FilterExpression: "#project_id = :projectId",
-        ExpressionAttributeNames: {
-          "#dimension_id": "dimension_id",
-          "#canonical_name": "canonical_name",
-          "#project_id": "project_id",
-        },
-        ExpressionAttributeValues: {
-          ":projectId": projectId,
-        },
-        ExclusiveStartKey: lastEvaluatedKey,
-      }),
-    );
-
-    for (const item of response.Items ?? []) {
-      const dimensionId = typeof item.dimension_id === "string" ? item.dimension_id.trim() : "";
-      const canonicalName =
-        typeof item.canonical_name === "string" ? item.canonical_name.trim().toLowerCase() : "";
-      if (!dimensionId || !canonicalName) continue;
-      if (!canonicalNameSet.has(canonicalName)) continue;
-      dimensionIds.push(dimensionId);
-    }
-
-    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
-  } while (lastEvaluatedKey);
+  for (const item of await listDimensionMetadataByProjectForStatusUpdate(projectId)) {
+    const dimensionId = typeof item.dimension_id === "string" ? item.dimension_id.trim() : "";
+    const canonicalName =
+      typeof item.canonical_name === "string" ? item.canonical_name.trim().toLowerCase() : "";
+    if (!dimensionId || !canonicalName) continue;
+    if (!canonicalNameSet.has(canonicalName)) continue;
+    dimensionIds.push(dimensionId);
+  }
 
   if (dimensionIds.length === 0) return 0;
 
@@ -200,7 +180,55 @@ export async function setDimensionMetadataStatusByProjectAndCanonicalNames(input
 async function scanDimensionMetadataKeysForProject(
   projectId: string,
 ): Promise<Array<{ dimension_id: string }>> {
-  const keys = new Map<string, { dimension_id: string }>();
+  const queriedKeys = new Map<string, { dimension_id: string }>();
+  try {
+    let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+    do {
+      const response = await docClient.send(
+        new QueryCommand({
+          TableName: config.dimensionMetadataTableName,
+          IndexName: DIMENSION_METADATA_BY_PROJECT_ID_INDEX,
+          KeyConditionExpression: "#project_id = :projectId",
+          ProjectionExpression: "#dimension_id",
+          ExpressionAttributeNames: {
+            "#dimension_id": "dimension_id",
+            "#project_id": "project_id",
+          },
+          ExpressionAttributeValues: {
+            ":projectId": projectId,
+          },
+          ExclusiveStartKey: lastEvaluatedKey,
+        }),
+      );
+
+      for (const item of response.Items ?? []) {
+        const dimensionId = item.dimension_id;
+        if (typeof dimensionId === "string" && dimensionId.trim().length > 0) {
+          queriedKeys.set(dimensionId, { dimension_id: dimensionId });
+        }
+      }
+
+      lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (lastEvaluatedKey);
+
+    return Array.from(queriedKeys.values());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const normalized = message.toLowerCase();
+    const missingIndex =
+      normalized.includes("index not found")
+      || normalized.includes("invalid index")
+      || normalized.includes("does not have the specified index");
+    if (!missingIndex) throw error;
+
+    console.warn("[dimension-metadata] project_id index missing, falling back to scan", {
+      indexName: DIMENSION_METADATA_BY_PROJECT_ID_INDEX,
+      message,
+    });
+  }
+
+  const fallbackKeys = new Map<string, { dimension_id: string }>();
   let lastEvaluatedKey: Record<string, unknown> | undefined;
 
   do {
@@ -223,37 +251,131 @@ async function scanDimensionMetadataKeysForProject(
     for (const item of response.Items ?? []) {
       const dimensionId = item.dimension_id;
       if (typeof dimensionId === "string" && dimensionId.trim().length > 0) {
-        keys.set(dimensionId, { dimension_id: dimensionId });
+        fallbackKeys.set(dimensionId, { dimension_id: dimensionId });
       }
     }
 
     lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
-  return Array.from(keys.values());
+  return Array.from(fallbackKeys.values());
 }
 
-async function scanAllDimensionMetadataKeys(): Promise<Array<{ dimension_id: string }>> {
-  const keys = new Map<string, { dimension_id: string }>();
+async function listDimensionMetadataByProjectForStatusUpdate(
+  projectId: string,
+): Promise<Array<{ dimension_id?: unknown; canonical_name?: unknown }>> {
+  try {
+    const rows: Array<{ dimension_id?: unknown; canonical_name?: unknown }> = [];
+    let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+    do {
+      const response = await docClient.send(
+        new QueryCommand({
+          TableName: config.dimensionMetadataTableName,
+          IndexName: DIMENSION_METADATA_BY_PROJECT_ID_INDEX,
+          KeyConditionExpression: "#project_id = :projectId",
+          ProjectionExpression: "#dimension_id, #canonical_name",
+          ExpressionAttributeNames: {
+            "#dimension_id": "dimension_id",
+            "#canonical_name": "canonical_name",
+            "#project_id": "project_id",
+          },
+          ExpressionAttributeValues: {
+            ":projectId": projectId,
+          },
+          ExclusiveStartKey: lastEvaluatedKey,
+        }),
+      );
+
+      rows.push(...((response.Items ?? []) as Array<{ dimension_id?: unknown; canonical_name?: unknown }>));
+      lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (lastEvaluatedKey);
+
+    return rows;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const normalized = message.toLowerCase();
+    const missingIndex =
+      normalized.includes("index not found")
+      || normalized.includes("invalid index")
+      || normalized.includes("does not have the specified index");
+    if (!missingIndex) throw error;
+
+    console.warn("[dimension-metadata] project_id index missing for status update, falling back to scan", {
+      indexName: DIMENSION_METADATA_BY_PROJECT_ID_INDEX,
+      message,
+    });
+  }
+
+  const rows: Array<{ dimension_id?: unknown; canonical_name?: unknown }> = [];
   let lastEvaluatedKey: Record<string, unknown> | undefined;
 
   do {
     const response = await docClient.send(
       new ScanCommand({
         TableName: config.dimensionMetadataTableName,
-        ProjectionExpression: "#dimension_id",
+        ProjectionExpression: "#dimension_id, #canonical_name",
+        FilterExpression: "#project_id = :projectId",
         ExpressionAttributeNames: {
           "#dimension_id": "dimension_id",
+          "#canonical_name": "canonical_name",
+          "#project_id": "project_id",
+        },
+        ExpressionAttributeValues: {
+          ":projectId": projectId,
         },
         ExclusiveStartKey: lastEvaluatedKey,
       }),
     );
 
+    rows.push(...((response.Items ?? []) as Array<{ dimension_id?: unknown; canonical_name?: unknown }>));
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (lastEvaluatedKey);
+
+  return rows;
+}
+
+async function getDimensionMetadataKeyAttributes(): Promise<string[]> {
+  const response = await client.send(
+    new DescribeTableCommand({
+      TableName: config.dimensionMetadataTableName,
+    }),
+  );
+  const keyAttributes = (response.Table?.KeySchema ?? [])
+    .map((entry) => entry.AttributeName)
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0);
+  if (keyAttributes.length === 0) {
+    throw new Error(`Unable to determine key schema for ${config.dimensionMetadataTableName}`);
+  }
+  return keyAttributes;
+}
+
+async function scanAllDimensionMetadataKeys(): Promise<DynamoKey[]> {
+  const keyAttributes = await getDimensionMetadataKeyAttributes();
+  const expressionAttributeNames = Object.fromEntries(
+    keyAttributes.map((attribute, index) => [`#key${index}`, attribute]),
+  );
+  const keys = new Map<string, DynamoKey>();
+  let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+  do {
+    const response = await docClient.send(
+      new ScanCommand({
+        TableName: config.dimensionMetadataTableName,
+        ProjectionExpression: Object.keys(expressionAttributeNames).join(", "),
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExclusiveStartKey: lastEvaluatedKey,
+      }),
+    );
+
     for (const item of response.Items ?? []) {
-      const dimensionId = item.dimension_id;
-      if (typeof dimensionId === "string" && dimensionId.trim().length > 0) {
-        keys.set(dimensionId, { dimension_id: dimensionId });
-      }
+      const key = Object.fromEntries(
+        keyAttributes
+          .map((attribute) => [attribute, item[attribute]])
+          .filter(([, value]) => value !== undefined),
+      );
+      if (Object.keys(key).length !== keyAttributes.length) continue;
+      keys.set(JSON.stringify(key), key);
     }
 
     lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
@@ -262,7 +384,7 @@ async function scanAllDimensionMetadataKeys(): Promise<Array<{ dimension_id: str
   return Array.from(keys.values());
 }
 
-async function batchDeleteByKeys(keys: Array<{ dimension_id: string }>): Promise<void> {
+async function batchDeleteByKeys(keys: DynamoKey[]): Promise<void> {
   if (keys.length === 0) return;
 
   const deleteRequests: BatchDeleteRequest[] = keys.map((key) => ({

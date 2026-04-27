@@ -14,6 +14,7 @@
     "test:v2": "node -r dotenv/config scripts/generate-insights-v2-test.mjs",
     "test:v2:validate": "node -r dotenv/config scripts/generate-insights-v2-s3-validate.mjs",
     "test:v2:prepass": "node -r dotenv/config scripts/generate-insights-v2-metadata-prepass-s3-test.mjs",
+    "eval:offline": "node -r dotenv/config scripts/generate-insights-offline-eval.mjs",
     "test:family-persistence": "node -r dotenv/config scripts/familyPersistence.test.mjs",
     "test:chunks": "node -r dotenv/config scripts/generate-insights-from-chunks-test.mjs"
   },

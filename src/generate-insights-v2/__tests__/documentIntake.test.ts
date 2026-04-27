@@ -89,12 +89,18 @@ describe("documentIntakeNode", () => {
     );
   });
 
-  it("keeps explicit projectId when provided", async () => {
+  it("ignores explicit projectId and always generates a unique workflow projectId", async () => {
     const state = makeBaseState();
     state.sourceUris = ["s3://bucket/documents/example.pdf"];
     state.projectId = "project-manual";
 
-    const result = await documentIntakeNode(state);
-    expect(result.projectId).toBe("project-manual");
+    const resultA = await documentIntakeNode(state);
+    const resultB = await documentIntakeNode(state);
+
+    expect(resultA.projectId).toMatch(
+      /^project-v2-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(resultA.projectId).not.toBe("project-manual");
+    expect(resultA.projectId).not.toBe(resultB.projectId);
   });
 });

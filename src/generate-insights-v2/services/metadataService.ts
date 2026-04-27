@@ -86,7 +86,14 @@ const DIMENSION_DEFINITIONS: Array<
   {
     canonical_name: "region",
     display_name: "Region",
-    aliases: ["region", "geography", "geo", "location", "market", "country", "state", "city"],
+    aliases: ["region", "geography", "geo", "market"],
+    dimension_type: "geographic",
+    value_type: "string",
+  },
+  {
+    canonical_name: "location",
+    display_name: "Location",
+    aliases: ["location", "city", "state", "country", "place"],
     dimension_type: "geographic",
     value_type: "string",
   },

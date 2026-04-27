@@ -76,8 +76,16 @@ export async function documentIntakeNode(
     };
   });
 
-  const projectId = state.projectId?.trim() || buildWorkflowProjectId();
+  const requestedProjectId = state.projectId?.trim();
+  const projectId = buildWorkflowProjectId();
   const userId = state.userId?.trim();
+
+  if (requestedProjectId) {
+    console.info("[document-intake] ignoring caller-provided projectId to enforce unique workflow project ids", {
+      requestedProjectId,
+      generatedProjectId: projectId,
+    });
+  }
 
   if (userId) {
     await upsertPendingProject({

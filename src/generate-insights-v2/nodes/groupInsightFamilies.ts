@@ -341,6 +341,27 @@ function buildFamilySearchText(input: {
     .join(" ");
 }
 
+function buildProjectScopedFamilyId(input: {
+  projectId?: string;
+  familyText: string;
+  questionAnswered: string;
+  filters: string[];
+  supportingFindingIds: string[];
+  index: number;
+}): string {
+  const seed = [
+    "family-v2",
+    `project:${input.projectId?.trim() || "none"}`,
+    `family_text:${normalizeText(input.familyText)}`,
+    `question:${normalizeText(input.questionAnswered)}`,
+    `filters:${input.filters.map((value) => normalizeFilterTag(value)).sort().join("|")}`,
+    `supporting:${Array.from(new Set(input.supportingFindingIds)).sort().join("|")}`,
+    `index:${input.index}`,
+  ].join("::");
+
+  return hashId(seed);
+}
+
 export async function groupInsightFamiliesNode(
   state: GenerateInsightsV2State,
 ): Promise<Partial<GenerateInsightsV2State>> {
@@ -542,7 +563,14 @@ export async function groupInsightFamiliesNode(
 
     const summary = typeof family.summary === "string" ? normalizeText(family.summary) : undefined;
 
-    const familyId = hashId(`${familyText}:${questionResult.questionAnswered}:${index}`);
+    const familyId = buildProjectScopedFamilyId({
+      projectId: state.projectId,
+      familyText,
+      questionAnswered: questionResult.questionAnswered,
+      filters: resolvedFilters,
+      supportingFindingIds,
+      index,
+    });
     insightFamilies.push({
       insight_id: familyId,
       family_id: familyId,

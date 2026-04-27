@@ -11,6 +11,8 @@ export type InsightMetadataEntry = {
   confidence?: number;
 };
 
+export type InsightTagEntry = Record<string, string>;
+
 export type InsightConfidence = {
   score: number;
   reasoning: string;
@@ -25,6 +27,9 @@ export type SupportingChunkRef = {
   chunk_id: string;
   paragraph_index?: number;
   line_index?: number;
+  table_id?: string;
+  evidence_cells?: Array<{ row: number; col: number }>;
+  row_indices?: number[];
 };
 
 export type Insight = {
@@ -49,6 +54,7 @@ export type Insight = {
   row_count?: number;
   table_dimensions?: string[];
   metric_columns?: string[];
+  insight_source_mode?: "explicit_nearby_text" | "synthesized_from_grid";
   document_ids?: string[];
   source_types?: string[];
   evidence_snippet: string;
@@ -56,6 +62,7 @@ export type Insight = {
   findings?: FindingRef[];
   sub_insights?: InsightSubInsight[];
   metadata?: InsightMetadataEntry[];
+  tags?: InsightTagEntry[];
   confidence?: InsightConfidence;
   footnote?: string;
   preloaded_project_insights?: Insight[];
@@ -183,6 +190,7 @@ export type MetadataFilter = {
 
 export type SearchFilters = {
   user_id?: string;
+  project_id?: string;
   document_id?: string;
   status?: string;
   parent_insight_id?: string;
@@ -254,6 +262,7 @@ export type PaginationSlice<T> = {
 
 export type SearchIndexConfig = {
   insightIdIndexName?: string;
+  projectIdIndexName?: string;
   userIdIndexName: string;
   documentIdIndexName: string;
   parentInsightIdIndexName: string;

@@ -182,7 +182,7 @@ flowchart LR
 
 ## `DELETE /insights/deleteAll`
 
-Description: Deletes all records in the configured insights table.
+Description: Deletes all records in the configured insights table and related known tables (`dimensionmetadata`, `insightfamilydata`, `insight_evaluation_traces`, `insight_review_events`, `projects`), plus the OpenSearch index.
 This route is intentionally blocked unless `ENABLE_UNSAFE_DELETE_ALL_INSIGHTS=true` is set on the backend process.
 
 Input:
@@ -196,7 +196,15 @@ Output:
 - `200 application/json`
 
 ```json
-{ "deleted": 123 }
+{
+  "deleted": 123,
+  "deletedFromDimensionMetadata": 45,
+  "deletedFromInsightFamilyData": 45,
+  "deletedFromInsightEvaluationTraces": 123,
+  "deletedFromInsightReviewEvents": 200,
+  "deletedFromProjects": 12,
+  "deletedFromOpenSearch": 123
+}
 ```
 
 - `500` on internal errors
@@ -206,8 +214,10 @@ System diagram:
 ```mermaid
 flowchart LR
   C[Client] --> API[Express /insights/deleteAll]
-  API --> DDB[(DynamoDB full-table scan delete when explicitly enabled)]
+  API --> DDB[(DynamoDB full-table cleanup across known tables when explicitly enabled)]
+  API --> OS[(OpenSearch full-index wipe)]
   DDB --> API
+  OS --> API
   API --> C
 ```
 

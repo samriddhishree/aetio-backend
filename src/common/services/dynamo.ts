@@ -27,6 +27,7 @@ const INSIGHTS_BY_USER_ID_INDEX = "GSI_UserId";
 const INSIGHTS_BY_DOCUMENT_ID_INDEX = "GSI_DocumentId";
 const INSIGHTS_BY_PARENT_INSIGHT_ID_INDEX = "GSI_ParentInsightId";
 const INSIGHTS_BY_STATUS_INDEX = "GSI_Status";
+const INSIGHTS_BY_PROJECT_ID_INDEX = config.ddbProjectIdIndexName;
 const ENABLE_UNSAFE_DELETE_ALL_INSIGHTS =
   process.env.ENABLE_UNSAFE_DELETE_ALL_INSIGHTS?.trim().toLowerCase() === "true";
 
@@ -44,12 +45,19 @@ export type InsightFilterKey =
 export type InsightFilters = Partial<Record<InsightFilterKey, string | string[] | null>>;
 
 type QueryTarget = {
-  partitionKey: "insight_id" | "user_id" | "document_id" | "parent_insight_id" | "status";
+  partitionKey:
+    | "insight_id"
+    | "project_id"
+    | "user_id"
+    | "document_id"
+    | "parent_insight_id"
+    | "status";
   indexName?: string;
 };
 
 const QUERY_PRIORITY: QueryTarget["partitionKey"][] = [
   "insight_id",
+  "project_id",
   "user_id",
   "document_id",
   "parent_insight_id",
@@ -58,6 +66,7 @@ const QUERY_PRIORITY: QueryTarget["partitionKey"][] = [
 
 const QUERY_TARGETS: Record<QueryTarget["partitionKey"], QueryTarget> = {
   insight_id: { partitionKey: "insight_id" },
+  project_id: { partitionKey: "project_id", indexName: INSIGHTS_BY_PROJECT_ID_INDEX },
   user_id: { partitionKey: "user_id", indexName: INSIGHTS_BY_USER_ID_INDEX },
   document_id: { partitionKey: "document_id", indexName: INSIGHTS_BY_DOCUMENT_ID_INDEX },
   parent_insight_id: {
@@ -203,7 +212,7 @@ export async function listInsights(filters: InsightFilters = {}): Promise<Insigh
     throw new Error(
       `No indexed partition key in requested filters [${filterEntries
         .map(([key]) => key)
-        .join(", ")}]. Supported partition keys: insight_id (table PK), user_id (GSI_UserId), document_id (GSI_DocumentId), parent_insight_id (GSI_ParentInsightId), status (GSI_Status).`,
+        .join(", ")}]. Supported partition keys: insight_id (table PK), project_id (${INSIGHTS_BY_PROJECT_ID_INDEX}), user_id (GSI_UserId), document_id (GSI_DocumentId), parent_insight_id (GSI_ParentInsightId), status (GSI_Status).`,
     );
   }
 
@@ -301,7 +310,7 @@ export async function deleteInsightsByProjectIdWithInsightIds(projectId: string)
     };
   }
 
-  const keys = await scanInsightKeysForProject(projectId);
+  const keys = await queryInsightKeysForProject(projectId);
   await batchDeleteByKeys(keys);
   const insightIds = Array.from(
     new Set(keys.map((key) => key.insight_id).filter((insightId) => insightId.trim().length > 0)),
@@ -456,48 +465,36 @@ async function queryInsightKeysByInsightId(
   return Array.from(keys.values());
 }
 
-async function scanInsightKeysForProject(
+async function queryInsightKeysForProject(
   projectId: string,
 ): Promise<Array<{ insight_id: string; user_id: string }>> {
+  const projectItems = await queryItemsByPartitionKey({
+    tableName: config.ddbTableName,
+    target: { partitionKey: "project_id", indexName: INSIGHTS_BY_PROJECT_ID_INDEX },
+    partitionValue: projectId,
+  });
+  const rootCandidates = await queryItemsByPartitionKey({
+    tableName: config.ddbTableName,
+    target: { partitionKey: "insight_id" },
+    partitionValue: projectId,
+  });
+
   const keys = new Map<string, { insight_id: string; user_id: string }>();
-  let lastEvaluatedKey: Record<string, unknown> | undefined;
-
-  do {
-    const response = await docClient.send(
-      new ScanCommand({
-        TableName: config.ddbTableName,
-        ProjectionExpression: "#insight_id, #user_id",
-        FilterExpression: "#project_id = :projectId OR #insight_id = :projectId",
-        ExpressionAttributeNames: {
-          "#project_id": "project_id",
-          "#insight_id": "insight_id",
-          "#user_id": "user_id",
-        },
-        ExpressionAttributeValues: {
-          ":projectId": projectId,
-        },
-        ExclusiveStartKey: lastEvaluatedKey,
-      }),
-    );
-
-    for (const item of response.Items ?? []) {
-      const insightId = item.insight_id;
-      const userId = item.user_id;
-      if (
-        typeof insightId === "string" &&
-        insightId.trim().length > 0 &&
-        typeof userId === "string" &&
-        userId.trim().length > 0
-      ) {
-        keys.set(`${insightId}::${userId}`, {
-          insight_id: insightId,
-          user_id: userId,
-        });
-      }
+  for (const item of [...projectItems, ...rootCandidates]) {
+    const insightId = item.insight_id;
+    const userId = item.user_id;
+    if (
+      typeof insightId === "string"
+      && insightId.trim().length > 0
+      && typeof userId === "string"
+      && userId.trim().length > 0
+    ) {
+      keys.set(`${insightId}::${userId}`, {
+        insight_id: insightId,
+        user_id: userId,
+      });
     }
-
-    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined;
-  } while (lastEvaluatedKey);
+  }
 
   return Array.from(keys.values());
 }

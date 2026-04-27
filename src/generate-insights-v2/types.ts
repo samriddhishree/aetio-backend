@@ -65,6 +65,8 @@ export type SupportingRef = {
   page?: number;
   section_title?: string;
   row_index?: number;
+  row_indices?: number[];
+  evidence_cells?: Array<{ row: number; col: number }>;
   cell_refs?: string[];
   source_excerpt?: string;
   source_file?: string;
@@ -130,12 +132,16 @@ export type InsightFamilyDataRow = InsightInstanceRow;
 export type InsightFamilyData = {
   table_id: string;
   family_id: string;
+  question_answered?: string;
   dimensions: string[];
   metric_columns: string[];
   row_count: number;
   rows: InsightFamilyDataRow[];
   table_markdown?: string;
   table_text_chunk?: string;
+  raw_table?: unknown;
+  table_semantic_object?: unknown;
+  table_understanding_summary?: unknown;
   source_modalities?: Array<"text" | "table" | "image">;
   created_at: string;
   updated_at: string;

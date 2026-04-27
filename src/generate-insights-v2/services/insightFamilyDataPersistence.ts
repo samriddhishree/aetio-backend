@@ -63,6 +63,7 @@ export function buildPersistedInsightFamilyDataRecord(
     familyData: {
       table_id: input.table.table_id,
       family_id: input.table.family_id,
+      question_answered: input.table.question_answered,
       s3_node: input.scopeS3Node,
       document_id: input.primaryDocumentId,
       document_ids: documentIds,
@@ -72,6 +73,9 @@ export function buildPersistedInsightFamilyDataRecord(
       metric_columns: input.table.metric_columns,
       table_markdown: input.table.table_markdown,
       table_text_chunk: input.table.table_text_chunk,
+      raw_table: input.table.raw_table,
+      table_semantic_object: input.table.table_semantic_object,
+      table_understanding_summary: input.table.table_understanding_summary,
       source_modalities: input.table.source_modalities ?? [],
       project_id: input.projectId,
       user_id: input.userId,
