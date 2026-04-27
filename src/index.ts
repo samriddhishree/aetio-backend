@@ -50,6 +50,7 @@ import {
 import {
   deleteAllProjects,
   deleteProjectsByProjectId,
+  findProjectByProjectId,
   listProjectsByUserAndStatus,
   updateProjectCountsByProjectId,
 } from "./common/services/projectsTable";
@@ -206,18 +207,7 @@ app.get("/projects/:projectId", async (req: Request, res: Response) => {
   }
 
   try {
-    const projectStatusCandidates = ["Pending", "Accepted", "Declined", "Completed"];
-    const projectBuckets = await Promise.all(
-      projectStatusCandidates.map((status) =>
-        listProjectsByUserAndStatus({
-          userId: jwtUserId,
-          status,
-        }),
-      ),
-    );
-    const project = projectBuckets
-      .flat()
-      .find((entry) => entry.project_id === projectId);
+    const project = await findProjectByProjectId(projectId);
     if (!project) {
       return res.status(404).json({ error: `Project not found: ${projectId}` });
     }

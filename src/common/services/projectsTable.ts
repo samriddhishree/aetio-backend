@@ -495,6 +495,28 @@ async function getProjectById(projectId: string): Promise<ProjectRecord | null> 
   return normalizeProjectRecordTimestamps(response.Item as ProjectRecord);
 }
 
+export async function findProjectByProjectId(projectId: string): Promise<ProjectRecord | null> {
+  const trimmed = projectId.trim();
+  if (!trimmed) return null;
+
+  const mode = await getProjectsKeyMode();
+  if (mode === "project_id") {
+    return getProjectById(trimmed);
+  }
+
+  const projects = await scanProjects({
+    FilterExpression: "#project_id = :projectId",
+    ExpressionAttributeNames: {
+      "#project_id": "project_id",
+    },
+    ExpressionAttributeValues: {
+      ":projectId": trimmed,
+    },
+  });
+
+  return projects[0] ? normalizeProjectRecordTimestamps(projects[0]) : null;
+}
+
 async function scanProjects(input?: {
   FilterExpression?: string;
   ExpressionAttributeNames?: Record<string, string>;
