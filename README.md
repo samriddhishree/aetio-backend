@@ -496,35 +496,19 @@ System diagram (vertical):
 
 ```mermaid
 flowchart TB
-  C[Client] --> API[Express /generate-insights-v2]
-  API --> DI[DocumentIntake]
-  DI --> DI_DETAILS["Normalizes input URIs into canonical document descriptors<br/>Detects file type for routing<br/>Output: documents[] with document_id, source_uri, file_type"]
-  DI_DETAILS --> CE[ContentExtraction]
-  CE --> CE_DETAILS["Fetches source files and parses via Unstructured API<br/>Preserves element-level provenance when available<br/>Output: extractedDocuments[]"]
-  CE_DETAILS --> N[Normalization]
-  N --> N_DETAILS["Converts extracted elements into text chunks and table objects<br/>Splits multi-grid delimited blocks and infers header rows<br/>Output: chunks[], tables[], normalizedDocuments[]"]
-  N_DETAILS --> FE[FindingExtraction]
-  FE --> FE_DETAILS["Produces atomic, evidence-grounded findings from chunk/table evidence units<br/>Preserves quantitative details and dimensions<br/>Output: findings[]"]
-  FE_DETAILS --> FC[FindingCritique]
-  FC --> FC_DETAILS["Applies deterministic and semantic validation<br/>Removes unsupported, duplicate, vague, or inconsistent findings<br/>Output: validatedFindings[]"]
-  FC_DETAILS --> MD[MetadataDimensionExtraction]
-  MD --> MD_DETAILS["Extracts candidate dimensions from validated findings<br/>Canonicalizes reusable dimension metadata and family filters<br/>Output: metadataFilters[], dimensionMetadata[]"]
-  MD_DETAILS --> RC[ResearchContextPreprocess]
-  RC --> RC_DETAILS["Normalizes optional research context into concise guidance fields<br/>Output: normalizedResearchContext"]
-  RC_DETAILS --> FG[FamilyGrouping]
-  FG --> FG_DETAILS["Groups validated findings into semantically grounded families<br/>Output: insightFamilies[] with family_text, question_answered, filters, supporting_finding_ids"]
-  FG_DETAILS --> FD[InsightFamilyDataBuilder]
-  FD --> FD_DETAILS["Infers family grid schema, builds normalized rows, deduplicates duplicates, and links families to table IDs<br/>Output: insightFamilyData[], insightRows[], enriched families"]
-  FD_DETAILS --> FV2[InsightFamilyDataValidation]
-  FV2 --> FV2_DETAILS["Validates row evidence, dimension alignment, and family-table consistency<br/>Marks invalid tabular families as non-tabular<br/>Output: repaired insightFamilyData[], insightRows[], families"]
-  FV2_DETAILS --> FV[FinalValidation]
-  FV --> FV_DETAILS["Final grounding checks on families and tables before persistence<br/>Output: final response-ready families, tables, and rows"]
-  FV_DETAILS --> PSF[PersistSearchableFamilies]
-  PSF --> PSF_DETAILS["Persists the family semantic layer, InsightFamilyData, and DimensionMetadata to DynamoDB<br/>Syncs only family search docs to OpenSearch<br/>Output: persisted counts and synced index docs"]
-  PSF_DETAILS --> DDB[(DynamoDB: families + familydata + metadata)]
-  DDB --> OS[(OpenSearch: family docs)]
-  OS --> API
-  API --> C
+  C[Client] --> API[Express /generate-insights-v2] --> DI[DocumentIntake] --> CE[ContentExtraction] --> N[Normalization] --> FE[FindingExtraction] --> FC[FindingCritique] --> MD[MetadataDimensionExtraction] --> RC[ResearchContextPreprocess] --> FG[FamilyGrouping] --> FD[InsightFamilyDataBuilder] --> FV2[InsightFamilyDataValidation] --> FV[FinalValidation] --> PSF[PersistSearchableFamilies] --> DDB[(DynamoDB: families + familydata + metadata)] --> OS[(OpenSearch: family docs)] --> API
+  DI -.-> DI_DETAILS["Normalizes input URIs into canonical document descriptors<br/>Detects file type for routing<br/>Output: documents[] with document_id, source_uri, file_type"]
+  CE -.-> CE_DETAILS["Fetches source files and parses via Unstructured API<br/>Preserves element-level provenance when available<br/>Output: extractedDocuments[]"]
+  N -.-> N_DETAILS["Converts extracted elements into text chunks and table objects<br/>Splits multi-grid delimited blocks and infers header rows<br/>Output: chunks[], tables[], normalizedDocuments[]"]
+  FE -.-> FE_DETAILS["Produces atomic, evidence-grounded findings from chunk/table evidence units<br/>Preserves quantitative details and dimensions<br/>Output: findings[]"]
+  FC -.-> FC_DETAILS["Applies deterministic and semantic validation<br/>Removes unsupported, duplicate, vague, or inconsistent findings<br/>Output: validatedFindings[]"]
+  MD -.-> MD_DETAILS["Extracts candidate dimensions from validated findings<br/>Canonicalizes reusable dimension metadata and family filters<br/>Output: metadataFilters[], dimensionMetadata[]"]
+  RC -.-> RC_DETAILS["Normalizes optional research context into concise guidance fields<br/>Output: normalizedResearchContext"]
+  FG -.-> FG_DETAILS["Groups validated findings into semantically grounded families<br/>Output: insightFamilies[] with family_text, question_answered, filters, supporting_finding_ids"]
+  FD -.-> FD_DETAILS["Infers family grid schema, builds normalized rows, deduplicates duplicates, and links families to table IDs<br/>Output: insightFamilyData[], insightRows[], enriched families"]
+  FV2 -.-> FV2_DETAILS["Validates row evidence, dimension alignment, and family-table consistency<br/>Marks invalid tabular families as non-tabular<br/>Output: repaired insightFamilyData[], insightRows[], families"]
+  FV -.-> FV_DETAILS["Final grounding checks on families and tables before persistence<br/>Output: final response-ready families, tables, and rows"]
+  PSF -.-> PSF_DETAILS["Persists the family semantic layer, InsightFamilyData, and DimensionMetadata to DynamoDB<br/>Syncs only family search docs to OpenSearch<br/>Output: persisted counts and synced index docs"]
 ```
 
 ### Useful tests and scripts
